@@ -82,6 +82,10 @@ AWS_DEFAULT_REGION = os.getenv(
     "us-east-1",
 )
 
+S3_PRESIGNED_URL_EXPIRATION = int(
+    os.getenv("S3_PRESIGNED_URL_EXPIRATION", "3600")
+)
+
 # =========================================================
 # ORACLE
 # =========================================================

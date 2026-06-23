@@ -1,8 +1,12 @@
 from compare_service import compare_signatures
 from detection_service import detect_signatures
 from pdf_service import extract_signatures_from_pdf
-from s3_oracle_service import get_client_documents, get_pdf_from_s3
-from watermark import build_watermarked_signature_base64
+from s3_oracle_service import (
+    get_client_documents,
+    get_pdf_from_s3,
+    get_pdf_view_url,
+)
+from watermark import build_watermarked_base64, build_watermarked_signature_base64
 
 
 def verify_signature(codigo_cliente: int, camera_signature):
@@ -14,6 +18,13 @@ def verify_signature(codigo_cliente: int, camera_signature):
             "match": False,
             "codigo_cliente": str(codigo_cliente),
             "message": "No se detecto firma en la imagen de camara",
+            "images": {
+                "camera_image_base64": build_watermarked_base64(
+                    camera_signature
+                ),
+                "camera_signature_base64": None,
+                "compared_document_signatures": [],
+            },
             "debug": {
                 "camera_signatures_detected": 0,
                 "documents_found": 0,
@@ -33,6 +44,12 @@ def verify_signature(codigo_cliente: int, camera_signature):
             "match": False,
             "codigo_cliente": str(codigo_cliente),
             "message": "Cliente sin documentos",
+            "images": {
+                "camera_signature_base64": build_watermarked_signature_base64(
+                    camera_signature_crop
+                ),
+                "compared_document_signatures": [],
+            },
             "debug": {
                 "camera_signatures_detected": len(camera_detections),
                 "documents_found": 0,
@@ -46,6 +63,14 @@ def verify_signature(codigo_cliente: int, camera_signature):
     pages_with_signatures = 0
     signatures_compared = 0
     errors = []
+    compared_signatures = []
+    file_view_urls = {}
+
+    def resolve_file_view_url(s3_key):
+        if s3_key not in file_view_urls:
+            file_view_urls[s3_key] = get_pdf_view_url(s3_key)
+
+        return file_view_urls[s3_key]
 
     best_attempt = {
         "score": 0.0,
@@ -54,6 +79,7 @@ def verify_signature(codigo_cliente: int, camera_signature):
         "threshold": None,
         "archivo": None,
         "s3_key": None,
+        "file_view_url": None,
         "page": None,
         "signature_index": None,
     }
@@ -112,6 +138,20 @@ def verify_signature(codigo_cliente: int, camera_signature):
                 signatures_compared += 1
 
                 score = float(compare_result["score"])
+                file_view_url = resolve_file_view_url(s3_key)
+
+                compared_signatures.append({
+                    "archivo": archivo,
+                    "s3_key": s3_key,
+                    "file_view_url": file_view_url,
+                    "page": page_number,
+                    "signature_index": signature_index,
+                    "score": compare_result["score"],
+                    "dice": compare_result["dice"],
+                    "iou": compare_result["iou"],
+                    "threshold": compare_result["threshold"],
+                    "image": document_signature.copy(),
+                })
 
                 if score > best_attempt["score"]:
                     best_attempt = {
@@ -121,6 +161,7 @@ def verify_signature(codigo_cliente: int, camera_signature):
                         "threshold": compare_result["threshold"],
                         "archivo": archivo,
                         "s3_key": s3_key,
+                        "file_view_url": file_view_url,
                         "page": page_number,
                         "signature_index": signature_index,
                         "debug_compare": compare_result.get("debug_compare"),
@@ -138,6 +179,7 @@ def verify_signature(codigo_cliente: int, camera_signature):
                         "document_match": {
                             "archivo": archivo,
                             "s3_key": s3_key,
+                            "file_view_url": file_view_url,
                             "page": page_number,
                             "signature_index": signature_index,
                         },
@@ -167,6 +209,28 @@ def verify_signature(codigo_cliente: int, camera_signature):
         "codigo_cliente": str(codigo_cliente),
         "message": "No se encontro coincidencia",
         "best_attempt": best_attempt,
+        "images": {
+            "camera_signature_base64": build_watermarked_signature_base64(
+                camera_signature_crop
+            ),
+            "compared_document_signatures": [
+                {
+                    "archivo": item["archivo"],
+                    "s3_key": item["s3_key"],
+                    "file_view_url": item["file_view_url"],
+                    "page": item["page"],
+                    "signature_index": item["signature_index"],
+                    "score": item["score"],
+                    "dice": item["dice"],
+                    "iou": item["iou"],
+                    "threshold": item["threshold"],
+                    "document_signature_base64": build_watermarked_signature_base64(
+                        item["image"]
+                    ),
+                }
+                for item in compared_signatures
+            ],
+        },
         "debug": {
             "camera_signatures_detected": len(camera_detections),
             "documents_found": len(documents),

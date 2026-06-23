@@ -11,6 +11,7 @@ from config import (
     AWS_SECRET_ACCESS_KEY,
     AWS_DEFAULT_BUCKET,
     AWS_DEFAULT_REGION,
+    S3_PRESIGNED_URL_EXPIRATION,
     DB_USERNAME,
     DB_PASSWORD,
     DB_HOST_PRO,
@@ -149,6 +150,29 @@ def get_pdf_from_s3(
     except Exception as e:
         logger.error(
             f"Error leyendo PDF: {e}"
+        )
+
+    return None
+
+
+def get_pdf_view_url(
+    s3_key: str,
+):
+    try:
+        return s3_client.generate_presigned_url(
+            ClientMethod="get_object",
+            Params={
+                "Bucket": AWS_DEFAULT_BUCKET,
+                "Key": s3_key,
+                "ResponseContentType": "application/pdf",
+                "ResponseContentDisposition": "inline",
+            },
+            ExpiresIn=S3_PRESIGNED_URL_EXPIRATION,
+        )
+
+    except Exception as e:
+        logger.error(
+            f"Error generando URL de visualizacion para {s3_key}: {e}"
         )
 
     return None
