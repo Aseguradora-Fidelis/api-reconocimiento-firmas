@@ -75,7 +75,8 @@ def get_client_documents(
         query = """
             SELECT
                 ADJ.DESCRIPCION,
-                BLB."KEY"
+                BLB."KEY",
+                main_fusa.pkg_general.nombre_contacto(CLI.COD_CONTACTO) AS nombre_cliente
             FROM MAIN_FUSA.MG_CONTACTOS CLI
 
             JOIN CONTACTO_EXPEDIENTE EX
@@ -114,6 +115,7 @@ def get_client_documents(
             documents.append({
                 "archivo": row[0],
                 "s3_key": row[1],
+                "nombre_cliente": row[2],
             })
 
         return documents

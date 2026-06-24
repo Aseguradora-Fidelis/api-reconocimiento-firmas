@@ -59,6 +59,27 @@ PDF_DPI = int(
     os.getenv("PDF_DPI", "200")
 )
 
+PDF_MAX_PAGES_TO_SCAN = int(
+    os.getenv("PDF_MAX_PAGES_TO_SCAN", "10")
+)
+
+PDF_MAX_SIGNATURES_TO_COMPARE = int(
+    os.getenv("PDF_MAX_SIGNATURES_TO_COMPARE", "8")
+)
+
+PDF_MAX_SIGNATURES_PER_PAGE = int(
+    os.getenv("PDF_MAX_SIGNATURES_PER_PAGE", "3")
+)
+
+PDF_NAME_MATCH_THRESHOLD = float(
+    os.getenv("PDF_NAME_MATCH_THRESHOLD", "0.60")
+)
+
+PDF_OCR_LANG = os.getenv(
+    "PDF_OCR_LANG",
+    "eng",
+)
+
 # =========================================================
 # WATERMARK
 # =========================================================
