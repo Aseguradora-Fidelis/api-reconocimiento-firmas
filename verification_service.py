@@ -30,6 +30,24 @@ def flatten_pdf_results(pdf_results):
     )
 
 
+def summarize_attempt(attempt):
+    return {
+        "score": attempt.get("score"),
+        "dice": attempt.get("dice"),
+        "iou": attempt.get("iou"),
+        "threshold": attempt.get("threshold"),
+        "archivo": attempt.get("archivo"),
+        "s3_key": attempt.get("s3_key"),
+        "file_view_url": attempt.get("file_view_url"),
+        "page": attempt.get("page"),
+        "signature_index": attempt.get("signature_index"),
+        "candidate_rank": attempt.get("candidate_rank"),
+        "name_text": attempt.get("name_text"),
+        "name_text_source": attempt.get("name_text_source"),
+        "name_match": attempt.get("name_match"),
+    }
+
+
 def verify_signature(codigo_cliente: int, camera_signature):
     camera_detections = detect_signatures(camera_signature)
 
@@ -110,6 +128,10 @@ def verify_signature(codigo_cliente: int, camera_signature):
         "file_view_url": None,
         "page": None,
         "signature_index": None,
+        "candidate_rank": None,
+        "name_text": None,
+        "name_text_source": None,
+        "name_match": None,
     }
 
     for document in documents:
@@ -253,6 +275,9 @@ def verify_signature(codigo_cliente: int, camera_signature):
                         "pages_with_signatures": pages_with_signatures,
                         "signatures_compared": signatures_compared,
                         "early_stop": True,
+                        "best_compared_candidate": summarize_attempt(
+                            best_attempt
+                        ),
                         "pdf_extraction": pdf_extraction_debug,
                         "errors": errors,
                         "debug_compare": compare_result.get("debug_compare"),
@@ -299,6 +324,7 @@ def verify_signature(codigo_cliente: int, camera_signature):
             "pages_with_signatures": pages_with_signatures,
             "signatures_compared": signatures_compared,
             "early_stop": False,
+            "best_compared_candidate": summarize_attempt(best_attempt),
             "pdf_extraction": pdf_extraction_debug,
             "errors": errors,
         },
