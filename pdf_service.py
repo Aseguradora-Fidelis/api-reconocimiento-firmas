@@ -350,6 +350,7 @@ def group_candidates_by_page(candidates):
             "context_bbox": candidate["context_bbox"],
             "confidence": candidate["confidence"],
             "image": candidate["image"],
+            "context_image": candidate["context_image"],
             "name_text": candidate["name_text"],
             "name_text_source": candidate["name_text_source"],
             "name_match": candidate["name_match"],
@@ -514,6 +515,11 @@ def extract_signature_candidates_from_pdf(
                     "context_bbox": context_bbox,
                     "confidence": detection["confidence"],
                     "image": crop.copy(),
+                    "context_image": (
+                        context_crop.copy()
+                        if context_crop is not None
+                        else None
+                    ),
                     "name_text": name_text,
                     "name_text_source": name_text_source,
                     "name_match": name_match,

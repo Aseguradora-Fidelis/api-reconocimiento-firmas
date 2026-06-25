@@ -74,32 +74,49 @@ def get_client_documents(
 
         query = """
             SELECT
-                ADJ.DESCRIPCION,
-                BLB."KEY",
-                main_fusa.pkg_general.nombre_contacto(CLI.COD_CONTACTO) AS nombre_cliente
-            FROM MAIN_FUSA.MG_CONTACTOS CLI
+                DOCS.DESCRIPCION,
+                DOCS.S3_KEY,
+                DOCS.CODIGO_CLIENTE,
+                main_fusa.pkg_general.nombre_contacto(
+                    DOCS.CODIGO_CLIENTE
+                ) AS nombre_cliente,
+                DOCS.CODIGO_REPRESENTANTE_LEGAL,
+                main_fusa.pkg_general.nombre_contacto(
+                    DOCS.CODIGO_REPRESENTANTE_LEGAL
+                ) AS nombre_representante_legal
+            FROM (
+                SELECT
+                    ADJ.DESCRIPCION,
+                    BLB."KEY" AS S3_KEY,
+                    CLI.COD_CONTACTO AS CODIGO_CLIENTE,
+                    main_fusa.pkg_doc_cg.obtener_representante_legal(
+                        NULL,
+                        CLI.COD_CONTACTO
+                    ) AS CODIGO_REPRESENTANTE_LEGAL
+                FROM MAIN_FUSA.MG_CONTACTOS CLI
 
-            JOIN CONTACTO_EXPEDIENTE EX
-                ON CLI.COD_CONTACTO = EX.COD_CONTACTO
+                JOIN CONTACTO_EXPEDIENTE EX
+                    ON CLI.COD_CONTACTO = EX.COD_CONTACTO
 
-            JOIN CONTACTO_EXPEDIENTE_ARCHIVO ARCH
-                ON EX.ID = ARCH.CONTACTO_EXPEDIENTE_ID
+                JOIN CONTACTO_EXPEDIENTE_ARCHIVO ARCH
+                    ON EX.ID = ARCH.CONTACTO_EXPEDIENTE_ID
 
-            JOIN CONTACTO_ARCHIVOS_ADJUNTOS ADJ
-                ON ARCH.ADJUNTO_ID = ADJ.ID
+                JOIN CONTACTO_ARCHIVOS_ADJUNTOS ADJ
+                    ON ARCH.ADJUNTO_ID = ADJ.ID
 
-            JOIN TIPO_ARCHIVO_ADJUNTO TADJ
-                ON ARCH.TIPO_ARCHIVO_ADJUNTO_ID = TADJ.ID
+                JOIN TIPO_ARCHIVO_ADJUNTO TADJ
+                    ON ARCH.TIPO_ARCHIVO_ADJUNTO_ID = TADJ.ID
 
-            JOIN ACTIVE_STORAGE_ATTACHMENTS ATC
-                ON ARCH.ID = ATC.RECORD_ID
+                JOIN ACTIVE_STORAGE_ATTACHMENTS ATC
+                    ON ARCH.ID = ATC.RECORD_ID
 
-            JOIN ACTIVE_STORAGE_BLOBS BLB
-                ON ATC.BLOB_ID = BLB.ID
+                JOIN ACTIVE_STORAGE_BLOBS BLB
+                    ON ATC.BLOB_ID = BLB.ID
 
-            WHERE CLI.COD_CONTACTO = :codigo_cliente
-              AND LOWER(TADJ.DESCRIPCION) LIKE  LOWER('%Estados%financieros%')
-              AND ATC.NAME = 'archivo_verificado'
+                WHERE CLI.COD_CONTACTO = :codigo_cliente
+                  AND LOWER(TADJ.DESCRIPCION) LIKE  LOWER('%Estados%financieros%')
+                  AND ATC.NAME = 'archivo_verificado'
+            ) DOCS
         """
 
         cursor.execute(
@@ -115,7 +132,10 @@ def get_client_documents(
             documents.append({
                 "archivo": row[0],
                 "s3_key": row[1],
-                "nombre_cliente": row[2],
+                "codigo_cliente": row[2],
+                "nombre_cliente": row[3],
+                "codigo_representante_legal": row[4],
+                "nombre_representante_legal": row[5],
             })
 
         return documents

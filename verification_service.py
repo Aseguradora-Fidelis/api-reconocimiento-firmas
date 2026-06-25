@@ -1,3 +1,4 @@
+from audit_service import persist_verification_audit
 from compare_service import compare_signatures
 from detection_service import detect_signatures
 from pdf_service import extract_signature_candidates_from_pdf
@@ -48,11 +49,117 @@ def summarize_attempt(attempt):
     }
 
 
+def resolve_ocr_client_name(documents):
+    for document in documents:
+        name = document.get("nombre_representante_legal")
+
+        if name:
+            return {
+                "name": name,
+                "source": "representante_legal",
+                "codigo_representante_legal": document.get(
+                    "codigo_representante_legal"
+                ),
+            }
+
+    for document in documents:
+        name = document.get("nombre_cliente")
+
+        if name:
+            return {
+                "name": name,
+                "source": "cliente_fallback",
+                "codigo_representante_legal": None,
+            }
+
+    return {
+        "name": None,
+        "source": None,
+        "codigo_representante_legal": None,
+    }
+
+
+def first_document_value(documents, key):
+    for document in documents:
+        value = document.get(key)
+
+        if value:
+            return value
+
+    return None
+
+
+def build_candidate_audit(page_number, signature):
+    return {
+        "page": page_number,
+        "signature_index": signature.get("signature_index"),
+        "candidate_rank": signature.get("candidate_rank"),
+        "confidence": signature.get("confidence"),
+        "bbox": signature.get("bbox"),
+        "context_bbox": signature.get("context_bbox"),
+        "candidate_image": signature.get("image"),
+        "context_image": signature.get("context_image"),
+        "name_text": signature.get("name_text"),
+        "name_text_source": signature.get("name_text_source"),
+        "name_match": signature.get("name_match"),
+        "compared": False,
+        "compare_result": None,
+        "is_best": False,
+    }
+
+
+def build_audit_payload(
+    codigo_cliente,
+    documents,
+    ocr_name_info,
+    status,
+    match_automatico,
+    best_attempt,
+    errors,
+    audit_documents,
+    camera_signature_image=None,
+):
+    return {
+        "codigo_cliente": codigo_cliente,
+        "codigo_representante_legal": ocr_name_info.get(
+            "codigo_representante_legal"
+        ),
+        "nombre_cliente": first_document_value(
+            documents,
+            "nombre_cliente",
+        ),
+        "nombre_representante_legal": first_document_value(
+            documents,
+            "nombre_representante_legal",
+        ),
+        "status": status,
+        "match_automatico": match_automatico,
+        "best_score": best_attempt.get("score"),
+        "request": {
+            "codigo_cliente": codigo_cliente,
+        },
+        "error_message": "; ".join(errors) if errors else None,
+        "camera_signature_image": camera_signature_image,
+        "documents": audit_documents,
+    }
+
+
+def attach_audit(result, audit_payload):
+    audit_result = persist_verification_audit(
+        audit_payload,
+        result,
+    )
+
+    result.setdefault("debug", {})["audit"] = audit_result
+
+    return result
+
+
 def verify_signature(codigo_cliente: int, camera_signature):
     camera_detections = detect_signatures(camera_signature)
 
     if not camera_detections:
-        return {
+        result = {
             "ok": False,
             "match": False,
             "codigo_cliente": str(codigo_cliente),
@@ -73,12 +180,28 @@ def verify_signature(codigo_cliente: int, camera_signature):
             },
         }
 
+        audit_payload = build_audit_payload(
+            codigo_cliente=codigo_cliente,
+            documents=[],
+            ocr_name_info={
+                "codigo_representante_legal": None,
+            },
+            status="no_match",
+            match_automatico=False,
+            best_attempt={},
+            errors=["No se detecto firma en la imagen de camara"],
+            audit_documents=[],
+            camera_signature_image=None,
+        )
+
+        return attach_audit(result, audit_payload)
+
     camera_signature_crop = camera_detections[0]["crop"]
 
     documents = get_client_documents(codigo_cliente)
 
     if not documents:
-        return {
+        result = {
             "ok": False,
             "match": False,
             "codigo_cliente": str(codigo_cliente),
@@ -98,6 +221,22 @@ def verify_signature(codigo_cliente: int, camera_signature):
             },
         }
 
+        audit_payload = build_audit_payload(
+            codigo_cliente=codigo_cliente,
+            documents=[],
+            ocr_name_info={
+                "codigo_representante_legal": None,
+            },
+            status="no_match",
+            match_automatico=False,
+            best_attempt={},
+            errors=["Cliente sin documentos"],
+            audit_documents=[],
+            camera_signature_image=camera_signature_crop,
+        )
+
+        return attach_audit(result, audit_payload)
+
     pdfs_read = 0
     pages_with_signatures = 0
     signatures_compared = 0
@@ -105,12 +244,11 @@ def verify_signature(codigo_cliente: int, camera_signature):
     compared_signatures = []
     file_view_urls = {}
     pdf_extraction_debug = []
+    audit_documents = []
+    best_audit_candidate = None
 
-    client_name = None
-    for document in documents:
-        if document.get("nombre_cliente"):
-            client_name = document["nombre_cliente"]
-            break
+    ocr_name_info = resolve_ocr_client_name(documents)
+    client_name = ocr_name_info["name"]
 
     def resolve_file_view_url(s3_key):
         if s3_key not in file_view_urls:
@@ -162,6 +300,14 @@ def verify_signature(codigo_cliente: int, camera_signature):
         extraction_debug["s3_key"] = s3_key
         pdf_extraction_debug.append(extraction_debug)
 
+        document_audit = {
+            "archivo": archivo,
+            "s3_key": s3_key,
+            "debug": extraction_debug,
+            "candidates": [],
+        }
+        audit_documents.append(document_audit)
+
         candidate_pages = {
             page_result["page"]
             for page_result in pdf_results
@@ -170,6 +316,21 @@ def verify_signature(codigo_cliente: int, camera_signature):
         pages_with_signatures += len(candidate_pages)
 
         candidates = flatten_pdf_results(pdf_results)
+        candidate_audits = {}
+
+        for candidate in candidates:
+            page_number = candidate["page"]
+            signature = candidate["signature"]
+            candidate_key = (
+                page_number,
+                signature["signature_index"],
+            )
+            candidate_audit = build_candidate_audit(
+                page_number,
+                signature,
+            )
+            document_audit["candidates"].append(candidate_audit)
+            candidate_audits[candidate_key] = candidate_audit
 
         for candidate in candidates:
             page_number = candidate["page"]
@@ -177,6 +338,12 @@ def verify_signature(codigo_cliente: int, camera_signature):
             signature_index = signature["signature_index"]
             document_signature = signature["image"]
             name_match = signature.get("name_match") or {}
+            candidate_audit = candidate_audits[
+                (
+                    page_number,
+                    signature_index,
+                )
+            ]
 
             try:
                 compare_result = compare_signatures(
@@ -200,6 +367,14 @@ def verify_signature(codigo_cliente: int, camera_signature):
                 continue
 
             signatures_compared += 1
+            candidate_audit["compared"] = True
+            candidate_audit["compare_result"] = {
+                "match": compare_result["match"],
+                "score": compare_result["score"],
+                "dice": compare_result["dice"],
+                "iou": compare_result["iou"],
+                "threshold": compare_result["threshold"],
+            }
 
             score = float(compare_result["score"])
             file_view_url = resolve_file_view_url(s3_key)
@@ -221,7 +396,16 @@ def verify_signature(codigo_cliente: int, camera_signature):
                 "image": document_signature.copy(),
             })
 
-            if score > best_attempt["score"]:
+            if (
+                best_audit_candidate is None
+                or score > best_attempt["score"]
+            ):
+                if best_audit_candidate is not None:
+                    best_audit_candidate["is_best"] = False
+
+                candidate_audit["is_best"] = True
+                best_audit_candidate = candidate_audit
+
                 best_attempt = {
                     "score": compare_result["score"],
                     "dice": compare_result["dice"],
@@ -240,7 +424,7 @@ def verify_signature(codigo_cliente: int, camera_signature):
                 }
 
             if compare_result["match"]:
-                return {
+                result = {
                     "ok": True,
                     "match": True,
                     "codigo_cliente": str(codigo_cliente),
@@ -270,6 +454,10 @@ def verify_signature(codigo_cliente: int, camera_signature):
                     "debug": {
                         "camera_signatures_detected": len(camera_detections),
                         "client_name": client_name,
+                        "client_name_source": ocr_name_info["source"],
+                        "codigo_representante_legal": ocr_name_info[
+                            "codigo_representante_legal"
+                        ],
                         "documents_found": len(documents),
                         "pdfs_read": pdfs_read,
                         "pages_with_signatures": pages_with_signatures,
@@ -284,7 +472,21 @@ def verify_signature(codigo_cliente: int, camera_signature):
                     },
                 }
 
-    return {
+                audit_payload = build_audit_payload(
+                    codigo_cliente=codigo_cliente,
+                    documents=documents,
+                    ocr_name_info=ocr_name_info,
+                    status="auto_match",
+                    match_automatico=True,
+                    best_attempt=best_attempt,
+                    errors=errors,
+                    audit_documents=audit_documents,
+                    camera_signature_image=camera_signature_crop,
+                )
+
+                return attach_audit(result, audit_payload)
+
+    result = {
         "ok": True,
         "match": False,
         "codigo_cliente": str(codigo_cliente),
@@ -319,6 +521,10 @@ def verify_signature(codigo_cliente: int, camera_signature):
         "debug": {
             "camera_signatures_detected": len(camera_detections),
             "client_name": client_name,
+            "client_name_source": ocr_name_info["source"],
+            "codigo_representante_legal": ocr_name_info[
+                "codigo_representante_legal"
+            ],
             "documents_found": len(documents),
             "pdfs_read": pdfs_read,
             "pages_with_signatures": pages_with_signatures,
@@ -329,3 +535,17 @@ def verify_signature(codigo_cliente: int, camera_signature):
             "errors": errors,
         },
     }
+
+    audit_payload = build_audit_payload(
+        codigo_cliente=codigo_cliente,
+        documents=documents,
+        ocr_name_info=ocr_name_info,
+        status="no_match",
+        match_automatico=False,
+        best_attempt=best_attempt,
+        errors=errors,
+        audit_documents=audit_documents,
+        camera_signature_image=camera_signature_crop,
+    )
+
+    return attach_audit(result, audit_payload)

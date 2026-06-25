@@ -107,6 +107,11 @@ S3_PRESIGNED_URL_EXPIRATION = int(
     os.getenv("S3_PRESIGNED_URL_EXPIRATION", "3600")
 )
 
+S3_SIGNATURE_AUDIT_PREFIX = os.getenv(
+    "S3_SIGNATURE_AUDIT_PREFIX",
+    "signature-verification",
+)
+
 # =========================================================
 # ORACLE
 # =========================================================
