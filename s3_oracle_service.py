@@ -199,6 +199,34 @@ def get_pdf_view_url(
 
     return None
 
+
+def get_s3_view_url(
+    s3_key: str,
+    content_type: str | None = None,
+):
+    try:
+        params = {
+            "Bucket": AWS_DEFAULT_BUCKET,
+            "Key": s3_key,
+            "ResponseContentDisposition": "inline",
+        }
+
+        if content_type:
+            params["ResponseContentType"] = content_type
+
+        return s3_client.generate_presigned_url(
+            ClientMethod="get_object",
+            Params=params,
+            ExpiresIn=S3_PRESIGNED_URL_EXPIRATION,
+        )
+
+    except Exception as e:
+        logger.error(
+            f"Error generando URL S3 para {s3_key}: {e}"
+        )
+
+    return None
+
 # =========================================================
 # CLIENT INFO
 # =========================================================

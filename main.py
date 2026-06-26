@@ -9,6 +9,7 @@ from fastapi import (
 
 from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
+from pydantic import BaseModel
 
 from config import (
     API_VERSION,
@@ -21,6 +22,11 @@ from image_utils import (
 
 from verification_service import (
     verify_signature,
+)
+
+from verification_query_service import (
+    get_verification_snapshot,
+    save_user_validation,
 )
 
 from s3_oracle_service import (
@@ -41,6 +47,14 @@ app = FastAPI(
     title="FIDELIS Signature API",
     version=API_VERSION,
 )
+
+
+class VerificationValidationRequest(BaseModel):
+    candidate_id: int | None = None
+    decision: str
+    validated_by: str | None = None
+    notes: str | None = None
+    training_eligible: bool = False
 
 # =========================================================
 # CORS
@@ -107,6 +121,82 @@ async def verify_signature_endpoint(
         raise HTTPException(
             status_code=500,
             detail=f"Error interno: {str(e)}",
+        )
+
+# =========================================================
+# SAVED VERIFICATION
+# =========================================================
+@app.get("/verification/{verification_id}")
+def verification_snapshot_endpoint(
+    verification_id: int,
+):
+    try:
+        snapshot = get_verification_snapshot(
+            verification_id=verification_id,
+        )
+
+        if not snapshot:
+            raise HTTPException(
+                status_code=404,
+                detail="Verificacion no encontrada",
+            )
+
+        return snapshot
+
+    except HTTPException:
+        raise
+
+    except Exception as e:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Error interno consultando verificacion: {str(e)}",
+        )
+
+
+@app.post("/verification/{verification_id}/validate")
+def verification_validate_endpoint(
+    verification_id: int,
+    payload: VerificationValidationRequest,
+):
+    try:
+        validation = save_user_validation(
+            verification_id=verification_id,
+            candidate_id=payload.candidate_id,
+            decision=payload.decision,
+            validated_by=payload.validated_by,
+            notes=payload.notes,
+            training_eligible=payload.training_eligible,
+        )
+
+        if not validation:
+            raise HTTPException(
+                status_code=404,
+                detail="Verificacion no encontrada",
+            )
+
+        snapshot = get_verification_snapshot(
+            verification_id=verification_id,
+        )
+
+        return {
+            "ok": True,
+            "validation": validation,
+            "snapshot": snapshot,
+        }
+
+    except ValueError as e:
+        raise HTTPException(
+            status_code=400,
+            detail=str(e),
+        )
+
+    except HTTPException:
+        raise
+
+    except Exception as e:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Error interno validando verificacion: {str(e)}",
         )
 
 # =========================================================
