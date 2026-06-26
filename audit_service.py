@@ -525,7 +525,65 @@ def persist_audit_images(
         }
 
 
-def persist_verification_audit(payload, response):
+def persist_audit_images_task(verification_id, payload):
+    conn = None
+    cursor = None
+
+    try:
+        conn = get_connection()
+        cursor = conn.cursor()
+
+        result = persist_audit_images(
+            conn=conn,
+            cursor=cursor,
+            verification_id=verification_id,
+            payload=payload,
+        )
+
+        if not result.get("saved"):
+            logger.error(
+                "No se guardaron imagenes de auditoria: %s",
+                result,
+            )
+
+    except Exception:
+        logger.exception(
+            "Error inesperado en tarea background de imagenes"
+        )
+
+    finally:
+        if cursor:
+            cursor.close()
+
+        if conn:
+            conn.close()
+
+
+def schedule_audit_images(
+    background_tasks,
+    verification_id,
+    payload,
+):
+    if background_tasks is None:
+        return False
+
+    if not hasattr(background_tasks, "add_task"):
+        return False
+
+    background_tasks.add_task(
+        persist_audit_images_task,
+        verification_id,
+        payload,
+    )
+
+    return True
+
+
+def persist_verification_audit(
+    payload,
+    response,
+    background_tasks=None,
+):
     conn = None
     cursor = None
 
@@ -568,6 +626,20 @@ def persist_verification_audit(payload, response):
         )
 
         conn.commit()
+
+        if schedule_audit_images(
+            background_tasks,
+            verification_id,
+            payload,
+        ):
+            return {
+                "saved": True,
+                "verification_id": verification_id,
+                "images": {
+                    "scheduled": True,
+                    "saved": False,
+                },
+            }
 
         images_result = persist_audit_images(
             conn=conn,

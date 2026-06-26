@@ -1,4 +1,5 @@
 from fastapi import (
+    BackgroundTasks,
     FastAPI,
     File,
     Form,
@@ -78,6 +79,7 @@ def health():
 # =========================================================
 @app.post("/verify-signature")
 async def verify_signature_endpoint(
+    background_tasks: BackgroundTasks,
     file: UploadFile = File(...),
     codigo_cliente: int = Form(...),
 ):
@@ -87,6 +89,7 @@ async def verify_signature_endpoint(
         result = verify_signature(
             codigo_cliente=codigo_cliente,
             camera_signature=camera_signature,
+            background_tasks=background_tasks,
         )
 
         return JSONResponse(result)
@@ -105,7 +108,7 @@ async def verify_signature_endpoint(
             status_code=500,
             detail=f"Error interno: {str(e)}",
         )
-    
+
 # =========================================================
 # CLIENT INFO
 # =========================================================
@@ -136,8 +139,8 @@ def client_info_endpoint(
         raise HTTPException(
             status_code=500,
             detail=f"Error interno consultando cliente: {str(e)}",
-        )    
-    
+        )
+
 @app.get("/condicion-entrega/{condicion_entrega_id}")
 def condicion_entrega_info_endpoint(
     condicion_entrega_id: int,
@@ -165,8 +168,8 @@ def condicion_entrega_info_endpoint(
         raise HTTPException(
             status_code=500,
             detail=f"Error interno: {str(e)}",
-        )    
-    
+        )
+
 @app.get("/poliza/{fianza}")
 def poliza_info_endpoint(
     fianza: int,
@@ -194,4 +197,4 @@ def poliza_info_endpoint(
         raise HTTPException(
             status_code=500,
             detail=f"Error interno: {str(e)}",
-        )    
+        )

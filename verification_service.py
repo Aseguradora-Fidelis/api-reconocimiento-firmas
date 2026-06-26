@@ -144,10 +144,15 @@ def build_audit_payload(
     }
 
 
-def attach_audit(result, audit_payload):
+def attach_audit(
+    result,
+    audit_payload,
+    background_tasks=None,
+):
     audit_result = persist_verification_audit(
         audit_payload,
         result,
+        background_tasks=background_tasks,
     )
 
     result.setdefault("debug", {})["audit"] = audit_result
@@ -155,7 +160,11 @@ def attach_audit(result, audit_payload):
     return result
 
 
-def verify_signature(codigo_cliente: int, camera_signature):
+def verify_signature(
+    codigo_cliente: int,
+    camera_signature,
+    background_tasks=None,
+):
     camera_detections = detect_signatures(camera_signature)
 
     if not camera_detections:
@@ -194,7 +203,11 @@ def verify_signature(codigo_cliente: int, camera_signature):
             camera_signature_image=None,
         )
 
-        return attach_audit(result, audit_payload)
+        return attach_audit(
+            result,
+            audit_payload,
+            background_tasks=background_tasks,
+        )
 
     camera_signature_crop = camera_detections[0]["crop"]
 
@@ -235,7 +248,11 @@ def verify_signature(codigo_cliente: int, camera_signature):
             camera_signature_image=camera_signature_crop,
         )
 
-        return attach_audit(result, audit_payload)
+        return attach_audit(
+            result,
+            audit_payload,
+            background_tasks=background_tasks,
+        )
 
     pdfs_read = 0
     pages_with_signatures = 0
@@ -484,7 +501,11 @@ def verify_signature(codigo_cliente: int, camera_signature):
                     camera_signature_image=camera_signature_crop,
                 )
 
-                return attach_audit(result, audit_payload)
+                return attach_audit(
+                    result,
+                    audit_payload,
+                    background_tasks=background_tasks,
+                )
 
     result = {
         "ok": True,
@@ -548,4 +569,8 @@ def verify_signature(codigo_cliente: int, camera_signature):
         camera_signature_image=camera_signature_crop,
     )
 
-    return attach_audit(result, audit_payload)
+    return attach_audit(
+        result,
+        audit_payload,
+        background_tasks=background_tasks,
+    )
