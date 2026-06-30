@@ -222,7 +222,7 @@ def apply_watermark(
     result = apply_black_text_layer(
         result,
         large_layer,
-        strength=0.78,
+        strength=0.50,
     )
 
     # =====================================================

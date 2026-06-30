@@ -7,7 +7,7 @@ load_dotenv()
 # GENERAL
 # =========================================================
 API_VERSION = "4.0.0"
-DEBUG_SAVE_FILES = True
+DEBUG_SAVE_FILES = False
 DEBUG_DIR = "debug_verify"
 
 # =========================================================
@@ -104,7 +104,7 @@ AWS_DEFAULT_REGION = os.getenv(
 )
 
 S3_PRESIGNED_URL_EXPIRATION = int(
-    os.getenv("S3_PRESIGNED_URL_EXPIRATION", "3600")
+    os.getenv("S3_PRESIGNED_URL_EXPIRATION", "60")
 )
 
 S3_SIGNATURE_AUDIT_PREFIX = os.getenv(

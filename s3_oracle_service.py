@@ -151,7 +151,7 @@ def get_client_documents(
 # =========================================================
 # S3 PDF MEMORY
 # =========================================================
-def get_pdf_from_s3(
+def get_s3_object_bytes(
     s3_key: str,
 ):
     try:
@@ -160,9 +160,7 @@ def get_pdf_from_s3(
             Key=s3_key,
         )
 
-        data = response["Body"].read()
-
-        return BytesIO(data)
+        return response["Body"].read()
 
     except ClientError as e:
         logger.error(
@@ -171,10 +169,21 @@ def get_pdf_from_s3(
 
     except Exception as e:
         logger.error(
-            f"Error leyendo PDF: {e}"
+            f"Error leyendo archivo S3 {s3_key}: {e}"
         )
 
     return None
+
+
+def get_pdf_from_s3(
+    s3_key: str,
+):
+    data = get_s3_object_bytes(s3_key)
+
+    if data is None:
+        return None
+
+    return BytesIO(data)
 
 
 def get_pdf_view_url(

@@ -1,12 +1,26 @@
+import logging
 import json
 
 import oracledb
 
+from image_utils import read_image_from_bytes
 from s3_oracle_service import (
     get_connection,
     get_pdf_view_url,
-    get_s3_view_url,
+    get_s3_object_bytes,
 )
+from watermark import (
+    build_watermarked_base64,
+    build_watermarked_signature_base64,
+)
+
+
+logger = logging.getLogger(__name__)
+
+SIGNATURE_IMAGE_TYPES = {
+    "camera_crop",
+    "candidate_crop",
+}
 
 
 def read_lob(value):
@@ -87,25 +101,54 @@ def fetch_all_dicts(cursor, query, params):
     ]
 
 
+def build_watermarked_s3_image_base64(
+    s3_key,
+    image_type,
+):
+    data = get_s3_object_bytes(s3_key)
+
+    if not data:
+        return None
+
+    image = read_image_from_bytes(data)
+
+    if image_type in SIGNATURE_IMAGE_TYPES:
+        return build_watermarked_signature_base64(image)
+
+    return build_watermarked_base64(image)
+
+
 def build_image(row):
     s3_key = row["s3_key"]
     content_type = row["content_type"]
+    image_type = row["tipo_imagen"]
+    image_base64 = None
+
+    try:
+        image_base64 = build_watermarked_s3_image_base64(
+            s3_key,
+            image_type,
+        )
+    except Exception as exc:
+        logger.exception(
+            "Error preparando imagen de snapshot %s: %s",
+            s3_key,
+            exc,
+        )
 
     return {
         "id": row["id"],
         "verification_id": row["verificacion_id"],
         "candidate_id": row["candidato_id"],
-        "type": row["tipo_imagen"],
-        "s3_key": s3_key,
-        "url": get_s3_view_url(
-            s3_key,
-            content_type=content_type,
-        ),
-        "content_type": content_type,
-        "width": row["width"],
-        "height": row["height"],
-        "file_size": row["file_size"],
-        "sha256": row["sha256"],
+        "type": image_type,
+        "image_base64": image_base64,
+        "content_type": "image/jpeg",
+        "watermarked": image_base64 is not None,
+        "source_content_type": content_type,
+        "source_width": row["width"],
+        "source_height": row["height"],
+        "source_file_size": row["file_size"],
+        "source_sha256": row["sha256"],
         "created_at": serialize_datetime(row["created_at"]),
     }
 
@@ -226,6 +269,20 @@ def get_candidate_for_validation(
     )
 
 
+def is_required_candidate_error(exc):
+    error = exc.args[0] if exc.args else exc
+    code = getattr(error, "code", None)
+    message = str(
+        getattr(error, "message", None)
+        or exc
+    ).upper()
+
+    return (
+        code in {1400, 1407}
+        and "CANDIDATO_ID" in message
+    )
+
+
 def save_user_validation(
     verification_id: int,
     candidate_id: int | None,
@@ -235,6 +292,9 @@ def save_user_validation(
     training_eligible: bool = False,
 ):
     validate_decision(decision)
+
+    if decision == "rejected":
+        candidate_id = None
 
     if decision in {"confirmed", "corrected"} and not candidate_id:
         raise ValueError(
@@ -307,24 +367,35 @@ def save_user_validation(
 
         status = resolve_status_for_decision(decision)
 
-        cursor.execute(
-            """
-            UPDATE FIRMA_VERIFICACION
-               SET STATUS = :status,
-                   BEST_CANDIDATO_ID = CASE
-                       WHEN :candidate_id IS NOT NULL
-                       THEN :candidate_id
-                       ELSE BEST_CANDIDATO_ID
-                   END,
-                   UPDATED_AT = SYSTIMESTAMP
-             WHERE ID = :verification_id
-            """,
-            {
-                "status": status,
-                "candidate_id": candidate_id,
-                "verification_id": verification_id,
-            },
-        )
+        if decision == "rejected":
+            cursor.execute(
+                """
+                UPDATE FIRMA_VERIFICACION
+                   SET STATUS = :status,
+                       BEST_CANDIDATO_ID = NULL,
+                       UPDATED_AT = SYSTIMESTAMP
+                 WHERE ID = :verification_id
+                """,
+                {
+                    "status": status,
+                    "verification_id": verification_id,
+                },
+            )
+        else:
+            cursor.execute(
+                """
+                UPDATE FIRMA_VERIFICACION
+                   SET STATUS = :status,
+                       BEST_CANDIDATO_ID = :candidate_id,
+                       UPDATED_AT = SYSTIMESTAMP
+                 WHERE ID = :verification_id
+                """,
+                {
+                    "status": status,
+                    "candidate_id": candidate_id,
+                    "verification_id": verification_id,
+                },
+            )
 
         conn.commit()
 
@@ -332,6 +403,19 @@ def save_user_validation(
             "validation_id": int(id_var.getvalue()[0]),
             "status": status,
         }
+
+    except oracledb.DatabaseError as exc:
+        if conn:
+            conn.rollback()
+
+        if decision == "rejected" and is_required_candidate_error(exc):
+            raise ValueError(
+                "La base de datos no permite registrar un rechazo sin "
+                "candidate_id. Permita NULL en "
+                "FIRMA_VALIDACION_USUARIO.CANDIDATO_ID."
+            ) from exc
+
+        raise
 
     except Exception:
         if conn:
