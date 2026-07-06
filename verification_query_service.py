@@ -229,11 +229,13 @@ def validate_decision(decision):
         "confirmed",
         "rejected",
         "corrected",
+        "only_accountant",
     }
 
     if decision not in allowed:
         raise ValueError(
-            "Decision invalida. Use confirmed, rejected o corrected"
+            "Decision invalida. Use confirmed, rejected, corrected "
+            "u only_accountant"
         )
 
 
@@ -243,6 +245,9 @@ def resolve_status_for_decision(decision):
 
     if decision == "rejected":
         return "user_rejected"
+
+    if decision == "only_accountant":
+        return "only_accountant"
 
     return "corrected_by_user"
 
@@ -291,6 +296,8 @@ def save_user_validation(
     notes: str | None = None,
     training_eligible: bool = False,
 ):
+    decision = (decision or "").strip().lower()
+
     validate_decision(decision)
 
     if decision == "rejected":
@@ -381,7 +388,8 @@ def save_user_validation(
                     "verification_id": verification_id,
                 },
             )
-        else:
+
+        elif decision in {"confirmed", "corrected"}:
             cursor.execute(
                 """
                 UPDATE FIRMA_VERIFICACION
@@ -397,6 +405,20 @@ def save_user_validation(
                 },
             )
 
+        else:
+            cursor.execute(
+                """
+                UPDATE FIRMA_VERIFICACION
+                   SET STATUS = :status,
+                       UPDATED_AT = SYSTIMESTAMP
+                 WHERE ID = :verification_id
+                """,
+                {
+                    "status": status,
+                    "verification_id": verification_id,
+                },
+            )
+
         conn.commit()
 
         return {
@@ -408,9 +430,12 @@ def save_user_validation(
         if conn:
             conn.rollback()
 
-        if decision == "rejected" and is_required_candidate_error(exc):
+        if (
+            decision in {"rejected", "only_accountant"}
+            and is_required_candidate_error(exc)
+        ):
             raise ValueError(
-                "La base de datos no permite registrar un rechazo sin "
+                "La base de datos no permite registrar esta decision sin "
                 "candidate_id. Permita NULL en "
                 "FIRMA_VALIDACION_USUARIO.CANDIDATO_ID."
             ) from exc

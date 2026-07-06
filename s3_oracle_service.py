@@ -83,7 +83,8 @@ def get_client_documents(
                 DOCS.CODIGO_REPRESENTANTE_LEGAL,
                 main_fusa.pkg_general.nombre_contacto(
                     DOCS.CODIGO_REPRESENTANTE_LEGAL
-                ) AS nombre_representante_legal
+                ) AS nombre_representante_legal,
+                DOCS.VERSION
             FROM (
                 SELECT
                     ADJ.DESCRIPCION,
@@ -92,30 +93,26 @@ def get_client_documents(
                     main_fusa.pkg_doc_cg.obtener_representante_legal(
                         NULL,
                         CLI.COD_CONTACTO
-                    ) AS CODIGO_REPRESENTANTE_LEGAL
+                    ) AS CODIGO_REPRESENTANTE_LEGAL,
+                    ARCH.VERSION
                 FROM MAIN_FUSA.MG_CONTACTOS CLI
-
                 JOIN CONTACTO_EXPEDIENTE EX
                     ON CLI.COD_CONTACTO = EX.COD_CONTACTO
-
                 JOIN CONTACTO_EXPEDIENTE_ARCHIVO ARCH
                     ON EX.ID = ARCH.CONTACTO_EXPEDIENTE_ID
-
                 JOIN CONTACTO_ARCHIVOS_ADJUNTOS ADJ
                     ON ARCH.ADJUNTO_ID = ADJ.ID
-
                 JOIN TIPO_ARCHIVO_ADJUNTO TADJ
                     ON ARCH.TIPO_ARCHIVO_ADJUNTO_ID = TADJ.ID
-
                 JOIN ACTIVE_STORAGE_ATTACHMENTS ATC
                     ON ARCH.ID = ATC.RECORD_ID
-
                 JOIN ACTIVE_STORAGE_BLOBS BLB
                     ON ATC.BLOB_ID = BLB.ID
-
                 WHERE CLI.COD_CONTACTO = :codigo_cliente
-                  AND LOWER(TADJ.DESCRIPCION) LIKE  LOWER('%Estados%financieros%')
-                  AND ATC.NAME = 'archivo_verificado'
+                AND LOWER(TADJ.DESCRIPCION) LIKE LOWER('%Estados%financieros%')
+                AND ATC.NAME = 'archivo_verificado'
+                ORDER BY ARCH.VERSION DESC
+                FETCH FIRST 1 ROW ONLY
             ) DOCS
         """
 
