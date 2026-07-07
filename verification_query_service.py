@@ -101,6 +101,140 @@ def fetch_all_dicts(cursor, query, params):
     ]
 
 
+def get_verification_stats(
+    fecha_inicio: str,
+    fecha_fin: str,
+):
+    default_stats = {
+        "total_validaciones": 0,
+        "clientes_distintos": 0,
+        "auto_match": 0,
+        "no_match": 0,
+        "errores": 0,
+        "pending_review": 0,
+        "user_confirmed": 0,
+        "user_rejected": 0,
+        "only_accountant": 0,
+    }
+
+    conn = None
+    cursor = None
+
+    try:
+        conn = get_connection()
+        cursor = conn.cursor()
+
+        row = fetch_one_dict(
+            cursor,
+            """
+            SELECT
+                COUNT(*) AS total_validaciones,
+                COUNT(DISTINCT codigo_cliente) AS clientes_distintos,
+                SUM(CASE WHEN status = 'auto_match' THEN 1 ELSE 0 END) AS auto_match,
+                SUM(CASE WHEN status = 'no_match' THEN 1 ELSE 0 END) AS no_match,
+                SUM(CASE WHEN status = 'error' THEN 1 ELSE 0 END) AS errores,
+                SUM(CASE WHEN status = 'pending_review' THEN 1 ELSE 0 END) AS pending_review,
+                SUM(CASE WHEN status = 'user_confirmed' THEN 1 ELSE 0 END) AS user_confirmed,
+                SUM(CASE WHEN status = 'user_rejected' THEN 1 ELSE 0 END) AS user_rejected,
+                SUM(CASE WHEN status = 'only_accountant' THEN 1 ELSE 0 END) AS only_accountant
+            FROM firma_verificacion
+            WHERE TRUNC(created_at) BETWEEN
+                  TO_DATE(:fecha_inicio, 'DD/MM/YYYY')
+              AND TO_DATE(:fecha_fin, 'DD/MM/YYYY')
+            """,
+            {
+                "fecha_inicio": fecha_inicio,
+                "fecha_fin": fecha_fin,
+            },
+        )
+
+        if not row:
+            return default_stats
+
+        return {
+            key: int(row.get(key) or 0)
+            for key in default_stats
+        }
+
+    finally:
+        if cursor:
+            cursor.close()
+
+        if conn:
+            conn.close()
+
+
+def get_verification_stats_daily(
+    fecha_inicio: str,
+    fecha_fin: str,
+):
+    stats_keys = {
+        "total_validaciones": 0,
+        "clientes_distintos": 0,
+        "auto_match": 0,
+        "no_match": 0,
+        "errores": 0,
+        "pending_review": 0,
+        "user_confirmed": 0,
+        "user_rejected": 0,
+        "only_accountant": 0,
+    }
+
+    conn = None
+    cursor = None
+
+    try:
+        conn = get_connection()
+        cursor = conn.cursor()
+
+        rows = fetch_all_dicts(
+            cursor,
+            """
+            SELECT
+                TO_CHAR(TRUNC(created_at), 'YYYY-MM-DD') AS fecha,
+                COUNT(*) AS total_validaciones,
+                COUNT(DISTINCT codigo_cliente) AS clientes_distintos,
+                SUM(CASE WHEN status = 'auto_match' THEN 1 ELSE 0 END) AS auto_match,
+                SUM(CASE WHEN status = 'no_match' THEN 1 ELSE 0 END) AS no_match,
+                SUM(CASE WHEN status = 'error' THEN 1 ELSE 0 END) AS errores,
+                SUM(CASE WHEN status = 'pending_review' THEN 1 ELSE 0 END) AS pending_review,
+                SUM(CASE WHEN status = 'user_confirmed' THEN 1 ELSE 0 END) AS user_confirmed,
+                SUM(CASE WHEN status = 'user_rejected' THEN 1 ELSE 0 END) AS user_rejected,
+                SUM(CASE WHEN status = 'only_accountant' THEN 1 ELSE 0 END) AS only_accountant
+            FROM firma_verificacion
+            WHERE TRUNC(created_at) BETWEEN
+                  TO_DATE(:fecha_inicio, 'DD/MM/YYYY')
+              AND TO_DATE(:fecha_fin, 'DD/MM/YYYY')
+            GROUP BY TRUNC(created_at)
+            ORDER BY TRUNC(created_at)
+            """,
+            {
+                "fecha_inicio": fecha_inicio,
+                "fecha_fin": fecha_fin,
+            },
+        )
+
+        return {
+            "items": [
+                {
+                    "fecha": row["fecha"],
+                    **{
+                        key: int(row.get(key) or 0)
+                        for key in stats_keys
+                    },
+                }
+                for row in rows
+            ]
+        }
+
+    finally:
+        if cursor:
+            cursor.close()
+
+        if conn:
+            conn.close()
+
+
 def build_watermarked_s3_image_base64(
     s3_key,
     image_type,

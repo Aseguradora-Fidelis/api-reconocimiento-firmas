@@ -3,9 +3,12 @@ from fastapi import (
     FastAPI,
     File,
     Form,
+    Query,
     UploadFile,
     HTTPException,
 )
+
+from datetime import datetime
 
 from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
@@ -25,6 +28,8 @@ from verification_service import (
 )
 
 from verification_query_service import (
+    get_verification_stats,
+    get_verification_stats_daily,
     get_verification_snapshot,
     save_user_validation,
 )
@@ -55,6 +60,16 @@ class VerificationValidationRequest(BaseModel):
     validated_by: str | None = None
     notes: str | None = None
     training_eligible: bool = False
+
+
+def normalize_date_param(value: str):
+    for date_format in ("%d/%m/%Y", "%Y-%m-%d"):
+        try:
+            return datetime.strptime(value, date_format).strftime("%d/%m/%Y")
+        except ValueError:
+            pass
+
+    raise ValueError("Las fechas deben tener formato DD/MM/YYYY o YYYY-MM-DD")
 
 # =========================================================
 # CORS
@@ -126,6 +141,87 @@ async def verify_signature_endpoint(
 # =========================================================
 # SAVED VERIFICATION
 # =========================================================
+@app.get("/verification-stats")
+def verification_stats_endpoint(
+    fecha_inicio: str,
+    fecha_fin: str,
+):
+    try:
+        fecha_inicio = normalize_date_param(fecha_inicio)
+        fecha_fin = normalize_date_param(fecha_fin)
+
+        return get_verification_stats(
+            fecha_inicio=fecha_inicio,
+            fecha_fin=fecha_fin,
+        )
+
+    except ValueError as e:
+        raise HTTPException(
+            status_code=400,
+            detail=str(e),
+        )
+
+    except Exception as e:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Error interno consultando estadisticas: {str(e)}",
+        )
+
+
+@app.get("/verification-stats/daily")
+def verification_stats_daily_endpoint(
+    fecha_inicio: str,
+    fecha_fin: str,
+):
+    try:
+        fecha_inicio = normalize_date_param(fecha_inicio)
+        fecha_fin = normalize_date_param(fecha_fin)
+
+        return get_verification_stats_daily(
+            fecha_inicio=fecha_inicio,
+            fecha_fin=fecha_fin,
+        )
+
+    except ValueError as e:
+        raise HTTPException(
+            status_code=400,
+            detail=str(e),
+        )
+
+    except Exception as e:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Error interno consultando estadisticas diarias: {str(e)}",
+        )
+
+
+@app.get("/reports/signature-validations/summary")
+def signature_validations_summary_endpoint(
+    start_date: str = Query(..., alias="startDate"),
+    end_date: str = Query(..., alias="endDate"),
+):
+    try:
+        fecha_inicio = normalize_date_param(start_date)
+        fecha_fin = normalize_date_param(end_date)
+
+        return get_verification_stats(
+            fecha_inicio=fecha_inicio,
+            fecha_fin=fecha_fin,
+        )
+
+    except ValueError as e:
+        raise HTTPException(
+            status_code=400,
+            detail=str(e),
+        )
+
+    except Exception as e:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Error interno consultando estadisticas: {str(e)}",
+        )
+
+
 @app.get("/verification/{verification_id}")
 def verification_snapshot_endpoint(
     verification_id: int,
