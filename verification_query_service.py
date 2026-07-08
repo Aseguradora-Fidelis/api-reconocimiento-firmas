@@ -235,6 +235,202 @@ def get_verification_stats_daily(
             conn.close()
 
 
+def to_float(value):
+    if value is None:
+        return None
+
+    return float(value)
+
+
+def build_verification_list_item(row):
+    return {
+        "verification_id": str(row["verification_id"]),
+        "fecha": serialize_datetime(row["fecha"]),
+        "codigo_cliente": (
+            str(row["codigo_cliente"])
+            if row["codigo_cliente"] is not None
+            else None
+        ),
+        "nombre_cliente": row["nombre_cliente"],
+        "status": row["status"],
+        "score": to_float(row["score"]),
+        "threshold": to_float(row["threshold"]),
+        "usuario": row["usuario"],
+        "documento_relacionado": row["documento_relacionado"],
+    }
+
+
+def build_verification_filters(
+    fecha_inicio: str,
+    fecha_fin: str,
+    status: str | None = None,
+    fecha: str | None = None,
+    cliente: str | None = None,
+    score_min: float | None = None,
+    score_max: float | None = None,
+):
+    filters = [
+        """
+        TRUNC(v.created_at) BETWEEN
+              TO_DATE(:fecha_inicio, 'DD/MM/YYYY')
+          AND TO_DATE(:fecha_fin, 'DD/MM/YYYY')
+        """
+    ]
+    params = {
+        "fecha_inicio": fecha_inicio,
+        "fecha_fin": fecha_fin,
+    }
+
+    if fecha:
+        filters.append(
+            "TRUNC(v.created_at) = TO_DATE(:fecha, 'DD/MM/YYYY')"
+        )
+        params["fecha"] = fecha
+
+    if status:
+        filters.append("v.status = :status")
+        params["status"] = status
+
+    if cliente:
+        filters.append(
+            """
+            (
+                LOWER(TO_CHAR(v.codigo_cliente)) LIKE :cliente
+                OR LOWER(v.nombre_cliente) LIKE :cliente
+            )
+            """
+        )
+        params["cliente"] = f"%{cliente.lower()}%"
+
+    if score_min is not None:
+        filters.append("v.best_score >= :score_min")
+        params["score_min"] = score_min
+
+    if score_max is not None:
+        filters.append("v.best_score <= :score_max")
+        params["score_max"] = score_max
+
+    return filters, params
+
+
+def get_verifications(
+    fecha_inicio: str,
+    fecha_fin: str,
+    status: str | None = None,
+    fecha: str | None = None,
+    cliente: str | None = None,
+    score_min: float | None = None,
+    score_max: float | None = None,
+    page: int = 1,
+    page_size: int = 50,
+):
+    conn = None
+    cursor = None
+
+    try:
+        conn = get_connection()
+        cursor = conn.cursor()
+
+        filters, params = build_verification_filters(
+            fecha_inicio=fecha_inicio,
+            fecha_fin=fecha_fin,
+            status=status,
+            fecha=fecha,
+            cliente=cliente,
+            score_min=score_min,
+            score_max=score_max,
+        )
+        where_clause = " AND ".join(filters)
+
+        total_row = fetch_one_dict(
+            cursor,
+            f"""
+            SELECT COUNT(*) AS total
+            FROM FIRMA_VERIFICACION v
+            WHERE {where_clause}
+            """,
+            params,
+        )
+        total = int(total_row["total"] or 0)
+
+        offset = (page - 1) * page_size
+        query_params = {
+            **params,
+            "offset": offset,
+            "page_size": page_size,
+        }
+
+        rows = fetch_all_dicts(
+            cursor,
+            f"""
+            WITH latest_validation AS (
+                SELECT
+                    VERIFICACION_ID,
+                    VALIDATED_BY,
+                    ROW_NUMBER() OVER (
+                        PARTITION BY VERIFICACION_ID
+                        ORDER BY VALIDATED_AT DESC, ID DESC
+                    ) AS RN
+                FROM FIRMA_VALIDACION_USUARIO
+            ),
+            first_document AS (
+                SELECT
+                    ID,
+                    VERIFICACION_ID,
+                    ARCHIVO,
+                    ROW_NUMBER() OVER (
+                        PARTITION BY VERIFICACION_ID
+                        ORDER BY ID
+                    ) AS RN
+                FROM FIRMA_VERIFICACION_DOCUMENTO
+            )
+            SELECT
+                v.ID AS verification_id,
+                v.CREATED_AT AS fecha,
+                v.CODIGO_CLIENTE AS codigo_cliente,
+                v.NOMBRE_CLIENTE AS nombre_cliente,
+                v.STATUS AS status,
+                v.BEST_SCORE AS score,
+                c.THRESHOLD AS threshold,
+                lv.VALIDATED_BY AS usuario,
+                COALESCE(d_best.ARCHIVO, d_first.ARCHIVO)
+                    AS documento_relacionado
+            FROM FIRMA_VERIFICACION v
+            LEFT JOIN FIRMA_VERIFICACION_CANDIDATO c
+                ON c.ID = v.BEST_CANDIDATO_ID
+            LEFT JOIN FIRMA_VERIFICACION_DOCUMENTO d_best
+                ON d_best.ID = c.DOCUMENTO_ID
+            LEFT JOIN first_document d_first
+                ON d_first.VERIFICACION_ID = v.ID
+               AND d_first.RN = 1
+            LEFT JOIN latest_validation lv
+                ON lv.VERIFICACION_ID = v.ID
+               AND lv.RN = 1
+            WHERE {where_clause}
+            ORDER BY v.CREATED_AT DESC, v.ID DESC
+            OFFSET :offset ROWS FETCH NEXT :page_size ROWS ONLY
+            """,
+            query_params,
+        )
+
+        return {
+            "items": [
+                build_verification_list_item(row)
+                for row in rows
+            ],
+            "total": total,
+            "page": page,
+            "page_size": page_size,
+        }
+
+    finally:
+        if cursor:
+            cursor.close()
+
+        if conn:
+            conn.close()
+
+
 def build_watermarked_s3_image_base64(
     s3_key,
     image_type,
@@ -257,12 +453,15 @@ def build_image(row):
     content_type = row["content_type"]
     image_type = row["tipo_imagen"]
     image_base64 = None
+    image_data_url = None
 
     try:
         image_base64 = build_watermarked_s3_image_base64(
             s3_key,
             image_type,
         )
+        if image_base64:
+            image_data_url = f"data:image/jpeg;base64,{image_base64}"
     except Exception as exc:
         logger.exception(
             "Error preparando imagen de snapshot %s: %s",
@@ -276,6 +475,7 @@ def build_image(row):
         "candidate_id": row["candidato_id"],
         "type": image_type,
         "image_base64": image_base64,
+        "image_data_url": image_data_url,
         "content_type": "image/jpeg",
         "watermarked": image_base64 is not None,
         "source_content_type": content_type,

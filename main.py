@@ -28,6 +28,7 @@ from verification_service import (
 )
 
 from verification_query_service import (
+    get_verifications,
     get_verification_stats,
     get_verification_stats_daily,
     get_verification_snapshot,
@@ -219,6 +220,56 @@ def signature_validations_summary_endpoint(
         raise HTTPException(
             status_code=500,
             detail=f"Error interno consultando estadisticas: {str(e)}",
+        )
+
+
+@app.get("/verification")
+def verifications_endpoint(
+    fecha_inicio: str,
+    fecha_fin: str,
+    status: str | None = None,
+    fecha: str | None = None,
+    cliente: str | None = None,
+    score_min: float | None = None,
+    score_max: float | None = None,
+    page: int = Query(1, ge=1),
+    page_size: int = Query(50, ge=1),
+):
+    try:
+        fecha_inicio = normalize_date_param(fecha_inicio)
+        fecha_fin = normalize_date_param(fecha_fin)
+        fecha = normalize_date_param(fecha) if fecha else None
+        status = status.strip().lower() if status else None
+        cliente = cliente.strip() if cliente else None
+
+        if score_min is not None and score_max is not None:
+            if score_min > score_max:
+                raise ValueError(
+                    "score_min no puede ser mayor que score_max"
+                )
+
+        return get_verifications(
+            fecha_inicio=fecha_inicio,
+            fecha_fin=fecha_fin,
+            status=status,
+            fecha=fecha,
+            cliente=cliente,
+            score_min=score_min,
+            score_max=score_max,
+            page=page,
+            page_size=page_size,
+        )
+
+    except ValueError as e:
+        raise HTTPException(
+            status_code=400,
+            detail=str(e),
+        )
+
+    except Exception as e:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Error interno consultando verificaciones: {str(e)}",
         )
 
 
