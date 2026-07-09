@@ -28,6 +28,7 @@ from verification_service import (
 )
 
 from verification_query_service import (
+    deactivate_verification,
     get_verifications,
     get_verification_stats,
     get_verification_stats_daily,
@@ -297,6 +298,37 @@ def verification_snapshot_endpoint(
         raise HTTPException(
             status_code=500,
             detail=f"Error interno consultando verificacion: {str(e)}",
+        )
+
+
+@app.delete("/verification/{verification_id}")
+def verification_delete_endpoint(
+    verification_id: int,
+):
+    try:
+        deleted = deactivate_verification(
+            verification_id=verification_id,
+        )
+
+        if not deleted:
+            raise HTTPException(
+                status_code=404,
+                detail="Verificacion no encontrada",
+            )
+
+        return {
+            "ok": True,
+            "verification_id": verification_id,
+            "estado": "I",
+        }
+
+    except HTTPException:
+        raise
+
+    except Exception as e:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Error interno eliminando verificacion: {str(e)}",
         )
 
 

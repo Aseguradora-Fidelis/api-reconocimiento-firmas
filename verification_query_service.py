@@ -17,6 +17,9 @@ from watermark import (
 
 logger = logging.getLogger(__name__)
 
+ACTIVE_VERIFICATION_STATE = "A"
+INACTIVE_VERIFICATION_STATE = "I"
+
 SIGNATURE_IMAGE_TYPES = {
     "camera_crop",
     "candidate_crop",
@@ -114,6 +117,7 @@ def get_verification_stats(
         "pending_review": 0,
         "user_confirmed": 0,
         "user_rejected": 0,
+        "corrected_by_user": 0,
         "only_accountant": 0,
     }
 
@@ -136,9 +140,11 @@ def get_verification_stats(
                 SUM(CASE WHEN status = 'pending_review' THEN 1 ELSE 0 END) AS pending_review,
                 SUM(CASE WHEN status = 'user_confirmed' THEN 1 ELSE 0 END) AS user_confirmed,
                 SUM(CASE WHEN status = 'user_rejected' THEN 1 ELSE 0 END) AS user_rejected,
+                SUM(CASE WHEN status = 'corrected_by_user' THEN 1 ELSE 0 END) AS corrected_by_user,
                 SUM(CASE WHEN status = 'only_accountant' THEN 1 ELSE 0 END) AS only_accountant
             FROM firma_verificacion
-            WHERE TRUNC(created_at) BETWEEN
+            WHERE estado = 'A'
+              AND TRUNC(created_at) BETWEEN
                   TO_DATE(:fecha_inicio, 'DD/MM/YYYY')
               AND TO_DATE(:fecha_fin, 'DD/MM/YYYY')
             """,
@@ -177,6 +183,7 @@ def get_verification_stats_daily(
         "pending_review": 0,
         "user_confirmed": 0,
         "user_rejected": 0,
+        "corrected_by_user": 0,
         "only_accountant": 0,
     }
 
@@ -200,9 +207,11 @@ def get_verification_stats_daily(
                 SUM(CASE WHEN status = 'pending_review' THEN 1 ELSE 0 END) AS pending_review,
                 SUM(CASE WHEN status = 'user_confirmed' THEN 1 ELSE 0 END) AS user_confirmed,
                 SUM(CASE WHEN status = 'user_rejected' THEN 1 ELSE 0 END) AS user_rejected,
+                SUM(CASE WHEN status = 'corrected_by_user' THEN 1 ELSE 0 END) AS corrected_by_user,
                 SUM(CASE WHEN status = 'only_accountant' THEN 1 ELSE 0 END) AS only_accountant
             FROM firma_verificacion
-            WHERE TRUNC(created_at) BETWEEN
+            WHERE estado = 'A'
+              AND TRUNC(created_at) BETWEEN
                   TO_DATE(:fecha_inicio, 'DD/MM/YYYY')
               AND TO_DATE(:fecha_fin, 'DD/MM/YYYY')
             GROUP BY TRUNC(created_at)
@@ -253,6 +262,7 @@ def build_verification_list_item(row):
         ),
         "nombre_cliente": row["nombre_cliente"],
         "status": row["status"],
+        "estado": row["estado"],
         "score": to_float(row["score"]),
         "threshold": to_float(row["threshold"]),
         "usuario": row["usuario"],
@@ -270,6 +280,7 @@ def build_verification_filters(
     score_max: float | None = None,
 ):
     filters = [
+        "v.estado = :estado_activo",
         """
         TRUNC(v.created_at) BETWEEN
               TO_DATE(:fecha_inicio, 'DD/MM/YYYY')
@@ -277,6 +288,7 @@ def build_verification_filters(
         """
     ]
     params = {
+        "estado_activo": ACTIVE_VERIFICATION_STATE,
         "fecha_inicio": fecha_inicio,
         "fecha_fin": fecha_fin,
     }
@@ -390,6 +402,7 @@ def get_verifications(
                 v.CODIGO_CLIENTE AS codigo_cliente,
                 v.NOMBRE_CLIENTE AS nombre_cliente,
                 v.STATUS AS status,
+                v.ESTADO AS estado,
                 v.BEST_SCORE AS score,
                 c.THRESHOLD AS threshold,
                 lv.VALIDATED_BY AS usuario,
@@ -655,8 +668,12 @@ def save_user_validation(
             SELECT ID
             FROM FIRMA_VERIFICACION
             WHERE ID = :verification_id
+              AND ESTADO = :estado_activo
             """,
-            {"verification_id": verification_id},
+            {
+                "verification_id": verification_id,
+                "estado_activo": ACTIVE_VERIFICATION_STATE,
+            },
         )
 
         if not verification:
@@ -809,6 +826,7 @@ def get_verification_snapshot(verification_id: int):
                 NOMBRE_CLIENTE,
                 NOMBRE_REPRESENTANTE_LEGAL,
                 STATUS,
+                ESTADO,
                 MATCH_AUTOMATICO,
                 BEST_SCORE,
                 BEST_CANDIDATO_ID,
@@ -819,8 +837,12 @@ def get_verification_snapshot(verification_id: int):
                 UPDATED_AT
             FROM FIRMA_VERIFICACION
             WHERE ID = :verification_id
+              AND ESTADO = :estado_activo
             """,
-            {"verification_id": verification_id},
+            {
+                "verification_id": verification_id,
+                "estado_activo": ACTIVE_VERIFICATION_STATE,
+            },
         )
 
         if not verification:
@@ -975,6 +997,7 @@ def get_verification_snapshot(verification_id: int):
                     "nombre_representante_legal"
                 ],
                 "status": verification["status"],
+                "estado": verification["estado"],
                 "match_automatico": yes_no_to_bool(
                     verification["match_automatico"]
                 ),
@@ -999,6 +1022,48 @@ def get_verification_snapshot(verification_id: int):
                 "ready": len(images) > 0,
             },
         }
+
+    finally:
+        if cursor:
+            cursor.close()
+
+        if conn:
+            conn.close()
+
+
+def deactivate_verification(verification_id: int):
+    conn = None
+    cursor = None
+
+    try:
+        conn = get_connection()
+        cursor = conn.cursor()
+
+        cursor.execute(
+            """
+            UPDATE FIRMA_VERIFICACION
+               SET ESTADO = :estado_inactivo,
+                   UPDATED_AT = SYSTIMESTAMP
+             WHERE ID = :verification_id
+               AND ESTADO = :estado_activo
+            """,
+            {
+                "estado_inactivo": INACTIVE_VERIFICATION_STATE,
+                "estado_activo": ACTIVE_VERIFICATION_STATE,
+                "verification_id": verification_id,
+            },
+        )
+
+        updated = cursor.rowcount > 0
+        conn.commit()
+
+        return updated
+
+    except Exception:
+        if conn:
+            conn.rollback()
+
+        raise
 
     finally:
         if cursor:
