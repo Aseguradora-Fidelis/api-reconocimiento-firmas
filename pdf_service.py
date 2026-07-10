@@ -1,5 +1,6 @@
 from io import BytesIO
 from difflib import SequenceMatcher
+import logging
 import re
 import unicodedata
 
@@ -17,6 +18,8 @@ from config import (
 )
 from detection_service import detect_signatures
 from image_utils import clamp_bbox, crop_from_bbox
+
+logger = logging.getLogger(__name__)
 
 try:
     import pytesseract
@@ -385,11 +388,12 @@ def pdf_to_images(pdf_buffer: BytesIO, dpi: int = PDF_DPI):
 
 def extract_signature_candidates_from_pdf(
     pdf_buffer: BytesIO,
-    stop_at_first_page: bool = True,
+    stop_at_first_page: bool = False,
     client_name: str | None = None,
     max_pages_to_scan: int = PDF_MAX_PAGES_TO_SCAN,
     max_signatures_to_compare: int = PDF_MAX_SIGNATURES_TO_COMPARE,
     max_signatures_per_page: int = PDF_MAX_SIGNATURES_PER_PAGE,
+    debug_context: dict | None = None,
 ):
     pdf_buffer.seek(0)
     pdf_bytes = pdf_buffer.read()
@@ -412,9 +416,11 @@ def extract_signature_candidates_from_pdf(
         "max_pages_to_scan": max_pages_to_scan,
         "max_signatures_to_compare": max_signatures_to_compare,
         "max_signatures_per_page": max_signatures_per_page,
+        "pdf_dpi": PDF_DPI,
         "signatures_detected": 0,
         "signatures_selected_before_ranking": 0,
         "signatures_returned_for_comparison": 0,
+        "detection_pages": [],
         "name_matches": 0,
         "name_mismatches": 0,
         "name_unknown": 0,
@@ -434,12 +440,44 @@ def extract_signature_candidates_from_pdf(
         for page_index in range(pages_to_scan):
             page = doc[page_index]
             page_number = page_index + 1
-            page_img, zoom = render_page_to_image(page)
+            page_img, zoom = render_page_to_image(
+                page,
+                dpi=PDF_DPI,
+            )
 
             debug["pages_scanned"] += 1
 
-            detections = detect_signatures(page_img)
+            page_debug_context = {
+                **(debug_context or {}),
+                "source": "pdf_page",
+                "page": page_number,
+            }
+
+            detections, detection_debug = detect_signatures(
+                page_img,
+                debug_context=page_debug_context,
+                return_debug=True,
+            )
+            debug["detection_pages"].append({
+                "page": page_number,
+                "render_dpi": PDF_DPI,
+                "render_width": int(page_img.shape[1]),
+                "render_height": int(page_img.shape[0]),
+                **detection_debug,
+            })
             debug["signatures_detected"] += len(detections)
+
+            logger.info(
+                "Pagina PDF analizada page=%s dpi=%s size=%sx%s "
+                "pre_nms=%s post_nms=%s post_best=%s",
+                page_number,
+                PDF_DPI,
+                page_img.shape[1],
+                page_img.shape[0],
+                detection_debug["pre_nms_count"],
+                detection_debug["post_nms_count"],
+                detection_debug["post_best_confidence_count"],
+            )
 
             if not detections:
                 continue
@@ -531,7 +569,17 @@ def extract_signature_candidates_from_pdf(
                 key=candidate_sort_key,
             )
 
-            if max_signatures_per_page and max_signatures_per_page > 0:
+            if (
+                max_signatures_per_page
+                and max_signatures_per_page > 0
+                and len(page_candidates) > max_signatures_per_page
+            ):
+                logger.warning(
+                    "Recortando firmas por pagina page=%s total=%s limit=%s",
+                    page_number,
+                    len(page_candidates),
+                    max_signatures_per_page,
+                )
                 page_candidates = page_candidates[:max_signatures_per_page]
 
             selected_candidates.extend(page_candidates)
@@ -550,7 +598,13 @@ def extract_signature_candidates_from_pdf(
         if (
             max_signatures_to_compare
             and max_signatures_to_compare > 0
+            and len(selected_candidates) > max_signatures_to_compare
         ):
+            logger.warning(
+                "Recortando firmas totales total=%s limit=%s",
+                len(selected_candidates),
+                max_signatures_to_compare,
+            )
             selected_candidates = selected_candidates[
                 :max_signatures_to_compare
             ]
@@ -576,7 +630,7 @@ def extract_signature_candidates_from_pdf(
 
 def extract_signatures_from_pdf(
     pdf_buffer: BytesIO,
-    stop_at_first_page: bool = True,
+    stop_at_first_page: bool = False,
 ):
     extracted = extract_signature_candidates_from_pdf(
         pdf_buffer=pdf_buffer,

@@ -3,11 +3,27 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
+
+def env_bool(name, default=False):
+    value = os.getenv(name)
+
+    if value is None:
+        return default
+
+    return value.strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "y",
+        "s",
+        "si",
+    }
+
 # =========================================================
 # GENERAL
 # =========================================================
 API_VERSION = "4.0.0"
-DEBUG_SAVE_FILES = False
+DEBUG_SAVE_FILES = True
 DEBUG_DIR = "debug_verify"
 
 # =========================================================
@@ -19,7 +35,65 @@ YOLO_MODEL_PATH = os.getenv(
 )
 
 YOLO_CONF_THRESHOLD = float(
-    os.getenv("YOLO_CONF_THRESHOLD", "0.10")
+    os.getenv("YOLO_CONF_THRESHOLD", "0.15")
+)
+
+YOLO_IOU_THRESHOLD = float(
+    os.getenv("YOLO_IOU_THRESHOLD", "0.70")
+)
+
+YOLO_MAX_DET = int(
+    os.getenv("YOLO_MAX_DET", "20")
+)
+
+YOLO_IMGSZ = int(
+    os.getenv("YOLO_IMGSZ", "320")
+)
+
+SIGNATURE_DETECTION_DEBUG = env_bool(
+    "SIGNATURE_DETECTION_DEBUG",
+    True,
+)
+
+SIGNATURE_DETECTION_DEBUG_DIR = os.getenv(
+    "SIGNATURE_DETECTION_DEBUG_DIR",
+    os.path.join(DEBUG_DIR, "detections"),
+)
+
+SIGNATURE_DEDUP_IOU_THRESHOLD = float(
+    os.getenv("SIGNATURE_DEDUP_IOU_THRESHOLD", "0.45")
+)
+
+SIGNATURE_DEDUP_CONTAINMENT_THRESHOLD = float(
+    os.getenv("SIGNATURE_DEDUP_CONTAINMENT_THRESHOLD", "0.75")
+)
+
+SIGNATURE_BEST_CONFIDENCE_RATIO = float(
+    os.getenv("SIGNATURE_BEST_CONFIDENCE_RATIO", "0.90")
+)
+
+SIGNATURE_MIN_KEEP_CONFIDENCE = float(
+    os.getenv("SIGNATURE_MIN_KEEP_CONFIDENCE", "0.70")
+)
+
+SIGNATURE_MAX_VARIANT_PIXELS = int(
+    os.getenv("SIGNATURE_MAX_VARIANT_PIXELS", "12000000")
+)
+
+SIGNATURE_TILE_ROWS = int(
+    os.getenv("SIGNATURE_TILE_ROWS", "3")
+)
+
+SIGNATURE_TILE_COLS = int(
+    os.getenv("SIGNATURE_TILE_COLS", "2")
+)
+
+SIGNATURE_TILE_OVERLAP = float(
+    os.getenv("SIGNATURE_TILE_OVERLAP", "0.12")
+)
+
+SIGNATURE_TILE_MIN_DIM = int(
+    os.getenv("SIGNATURE_TILE_MIN_DIM", "900")
 )
 
 # =========================================================
@@ -56,7 +130,7 @@ SEARCH_ROTATIONS = [
 # PDF
 # =========================================================
 PDF_DPI = int(
-    os.getenv("PDF_DPI", "200")
+    os.getenv("PDF_DPI", "300")
 )
 
 PDF_MAX_PAGES_TO_SCAN = int(
@@ -64,11 +138,11 @@ PDF_MAX_PAGES_TO_SCAN = int(
 )
 
 PDF_MAX_SIGNATURES_TO_COMPARE = int(
-    os.getenv("PDF_MAX_SIGNATURES_TO_COMPARE", "8")
+    os.getenv("PDF_MAX_SIGNATURES_TO_COMPARE", "0")
 )
 
 PDF_MAX_SIGNATURES_PER_PAGE = int(
-    os.getenv("PDF_MAX_SIGNATURES_PER_PAGE", "3")
+    os.getenv("PDF_MAX_SIGNATURES_PER_PAGE", "4")
 )
 
 PDF_NAME_MATCH_THRESHOLD = float(

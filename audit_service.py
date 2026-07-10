@@ -107,6 +107,8 @@ def insert_verification(cursor, payload, response):
         """
         INSERT INTO FIRMA_VERIFICACION (
             CODIGO_CLIENTE,
+            CONDICION_ENTREGA_ID,
+            FIANZA,
             CODIGO_REPRESENTANTE_LEGAL,
             NOMBRE_CLIENTE,
             NOMBRE_REPRESENTANTE_LEGAL,
@@ -118,6 +120,8 @@ def insert_verification(cursor, payload, response):
             ERROR_MESSAGE
         ) VALUES (
             :codigo_cliente,
+            :condicion_entrega_id,
+            :fianza,
             :codigo_representante_legal,
             :nombre_cliente,
             :nombre_representante_legal,
@@ -132,6 +136,10 @@ def insert_verification(cursor, payload, response):
         """,
         {
             "codigo_cliente": payload.get("codigo_cliente"),
+            "condicion_entrega_id": safe_number(
+                payload.get("condicion_entrega_id")
+            ),
+            "fianza": safe_number(payload.get("fianza")),
             "codigo_representante_legal": payload.get(
                 "codigo_representante_legal"
             ),

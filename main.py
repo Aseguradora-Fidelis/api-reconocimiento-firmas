@@ -1,3 +1,5 @@
+import logging
+
 from fastapi import (
     BackgroundTasks,
     FastAPI,
@@ -42,6 +44,9 @@ from s3_oracle_service import (
     get_client_by_fianza
 )
 
+
+logger = logging.getLogger(__name__)
+
 # =========================================================
 # VALIDATE CONFIG
 # =========================================================
@@ -72,6 +77,23 @@ def normalize_date_param(value: str):
             pass
 
     raise ValueError("Las fechas deben tener formato DD/MM/YYYY o YYYY-MM-DD")
+
+
+def parse_optional_int(value, field_name: str):
+    if value is None:
+        return None
+
+    value = str(value).strip()
+
+    if not value:
+        return None
+
+    try:
+        return int(value)
+    except ValueError as exc:
+        raise ValueError(
+            f"{field_name} debe ser numerico"
+        ) from exc
 
 # =========================================================
 # CORS
@@ -113,12 +135,24 @@ async def verify_signature_endpoint(
     background_tasks: BackgroundTasks,
     file: UploadFile = File(...),
     codigo_cliente: int = Form(...),
+    condicion_entrega_id: str | None = Form(None),
+    fianza: str | None = Form(None),
 ):
     try:
         camera_signature = read_upload_file(file)
+        condicion_entrega_id = parse_optional_int(
+            condicion_entrega_id,
+            "condicion_entrega_id",
+        )
+        fianza = parse_optional_int(
+            fianza,
+            "fianza",
+        )
 
         result = verify_signature(
             codigo_cliente=codigo_cliente,
+            condicion_entrega_id=condicion_entrega_id,
+            fianza=fianza,
             camera_signature=camera_signature,
             background_tasks=background_tasks,
         )
@@ -135,6 +169,7 @@ async def verify_signature_endpoint(
         raise
 
     except Exception as e:
+        logger.exception("Error interno en /verify-signature")
         raise HTTPException(
             status_code=500,
             detail=f"Error interno: {str(e)}",

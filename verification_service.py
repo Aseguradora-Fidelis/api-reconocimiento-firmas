@@ -117,10 +117,14 @@ def build_audit_payload(
     best_attempt,
     errors,
     audit_documents,
+    condicion_entrega_id=None,
+    fianza=None,
     camera_signature_image=None,
 ):
     return {
         "codigo_cliente": codigo_cliente,
+        "condicion_entrega_id": condicion_entrega_id,
+        "fianza": fianza,
         "codigo_representante_legal": ocr_name_info.get(
             "codigo_representante_legal"
         ),
@@ -137,6 +141,8 @@ def build_audit_payload(
         "best_score": best_attempt.get("score"),
         "request": {
             "codigo_cliente": codigo_cliente,
+            "condicion_entrega_id": condicion_entrega_id,
+            "fianza": fianza,
         },
         "error_message": "; ".join(errors) if errors else None,
         "camera_signature_image": camera_signature_image,
@@ -163,15 +169,25 @@ def attach_audit(
 def verify_signature(
     codigo_cliente: int,
     camera_signature,
+    condicion_entrega_id: int | None = None,
+    fianza: int | None = None,
     background_tasks=None,
 ):
-    camera_detections = detect_signatures(camera_signature)
+    camera_detections, camera_detection_debug = detect_signatures(
+        camera_signature,
+        debug_context={
+            "source": "camera",
+        },
+        return_debug=True,
+    )
 
     if not camera_detections:
         result = {
             "ok": False,
             "match": False,
             "codigo_cliente": str(codigo_cliente),
+            "condicion_entrega_id": condicion_entrega_id,
+            "fianza": fianza,
             "message": "No se detecto firma en la imagen de camara",
             "images": {
                 "camera_image_base64": build_watermarked_base64(
@@ -182,6 +198,7 @@ def verify_signature(
             },
             "debug": {
                 "camera_signatures_detected": 0,
+                "camera_detection": camera_detection_debug,
                 "documents_found": 0,
                 "pdfs_read": 0,
                 "pages_with_signatures": 0,
@@ -200,6 +217,8 @@ def verify_signature(
             best_attempt={},
             errors=["No se detecto firma en la imagen de camara"],
             audit_documents=[],
+            condicion_entrega_id=condicion_entrega_id,
+            fianza=fianza,
             camera_signature_image=None,
         )
 
@@ -218,6 +237,8 @@ def verify_signature(
             "ok": False,
             "match": False,
             "codigo_cliente": str(codigo_cliente),
+            "condicion_entrega_id": condicion_entrega_id,
+            "fianza": fianza,
             "message": "Cliente sin documentos",
             "images": {
                 "camera_signature_base64": build_watermarked_signature_base64(
@@ -227,6 +248,7 @@ def verify_signature(
             },
             "debug": {
                 "camera_signatures_detected": len(camera_detections),
+                "camera_detection": camera_detection_debug,
                 "documents_found": 0,
                 "pdfs_read": 0,
                 "pages_with_signatures": 0,
@@ -245,6 +267,8 @@ def verify_signature(
             best_attempt={},
             errors=["Cliente sin documentos"],
             audit_documents=[],
+            condicion_entrega_id=condicion_entrega_id,
+            fianza=fianza,
             camera_signature_image=camera_signature_crop,
         )
 
@@ -263,6 +287,8 @@ def verify_signature(
     pdf_extraction_debug = []
     audit_documents = []
     best_audit_candidate = None
+    best_compared_signature = None
+    has_match = False
 
     ocr_name_info = resolve_ocr_client_name(documents)
     client_name = ocr_name_info["name"]
@@ -306,6 +332,10 @@ def verify_signature(
                 pdf_buffer=pdf_buffer,
                 stop_at_first_page=False,
                 client_name=client_name,
+                debug_context={
+                    "archivo": archivo,
+                    "s3_key": s3_key,
+                },
             )
         except Exception as e:
             errors.append(f"Error extrayendo firmas de {archivo}: {e}")
@@ -396,7 +426,7 @@ def verify_signature(
             score = float(compare_result["score"])
             file_view_url = resolve_file_view_url(s3_key)
 
-            compared_signatures.append({
+            compared_signature = {
                 "archivo": archivo,
                 "s3_key": s3_key,
                 "file_view_url": file_view_url,
@@ -406,12 +436,14 @@ def verify_signature(
                 "name_text": signature.get("name_text"),
                 "name_text_source": signature.get("name_text_source"),
                 "name_match": name_match,
+                "match": compare_result["match"],
                 "score": compare_result["score"],
                 "dice": compare_result["dice"],
                 "iou": compare_result["iou"],
                 "threshold": compare_result["threshold"],
                 "image": document_signature.copy(),
-            })
+            }
+            compared_signatures.append(compared_signature)
 
             if (
                 best_audit_candidate is None
@@ -439,108 +471,128 @@ def verify_signature(
                     "name_match": name_match,
                     "debug_compare": compare_result.get("debug_compare"),
                 }
+                best_compared_signature = compared_signature
 
             if compare_result["match"]:
-                result = {
-                    "ok": True,
-                    "match": True,
-                    "codigo_cliente": str(codigo_cliente),
-                    "score": compare_result["score"],
-                    "dice": compare_result["dice"],
-                    "iou": compare_result["iou"],
-                    "threshold": compare_result["threshold"],
-                    "document_match": {
-                        "archivo": archivo,
-                        "s3_key": s3_key,
-                        "file_view_url": file_view_url,
-                        "page": page_number,
-                        "signature_index": signature_index,
-                        "candidate_rank": signature.get("candidate_rank"),
-                        "name_text": signature.get("name_text"),
-                        "name_text_source": signature.get("name_text_source"),
-                        "name_match": name_match,
-                    },
-                    "images": {
-                        "camera_signature_base64": build_watermarked_signature_base64(
-                            camera_signature_crop
-                        ),
-                        "matched_document_signature_base64": build_watermarked_signature_base64(
-                            document_signature
-                        ),
-                    },
-                    "debug": {
-                        "camera_signatures_detected": len(camera_detections),
-                        "client_name": client_name,
-                        "client_name_source": ocr_name_info["source"],
-                        "codigo_representante_legal": ocr_name_info[
-                            "codigo_representante_legal"
-                        ],
-                        "documents_found": len(documents),
-                        "pdfs_read": pdfs_read,
-                        "pages_with_signatures": pages_with_signatures,
-                        "signatures_compared": signatures_compared,
-                        "early_stop": True,
-                        "best_compared_candidate": summarize_attempt(
-                            best_attempt
-                        ),
-                        "pdf_extraction": pdf_extraction_debug,
-                        "errors": errors,
-                        "debug_compare": compare_result.get("debug_compare"),
-                    },
-                }
+                has_match = True
 
-                audit_payload = build_audit_payload(
-                    codigo_cliente=codigo_cliente,
-                    documents=documents,
-                    ocr_name_info=ocr_name_info,
-                    status="auto_match",
-                    match_automatico=True,
-                    best_attempt=best_attempt,
-                    errors=errors,
-                    audit_documents=audit_documents,
-                    camera_signature_image=camera_signature_crop,
-                )
+    compared_document_signatures = [
+        {
+            "archivo": item["archivo"],
+            "s3_key": item["s3_key"],
+            "file_view_url": item["file_view_url"],
+            "page": item["page"],
+            "signature_index": item["signature_index"],
+            "candidate_rank": item["candidate_rank"],
+            "name_text": item["name_text"],
+            "name_text_source": item["name_text_source"],
+            "name_match": item["name_match"],
+            "match": item["match"],
+            "score": item["score"],
+            "dice": item["dice"],
+            "iou": item["iou"],
+            "threshold": item["threshold"],
+            "document_signature_base64": build_watermarked_signature_base64(
+                item["image"]
+            ),
+        }
+        for item in compared_signatures
+    ]
 
-                return attach_audit(
-                    result,
-                    audit_payload,
-                    background_tasks=background_tasks,
-                )
+    if has_match and best_compared_signature:
+        result = {
+            "ok": True,
+            "match": True,
+            "codigo_cliente": str(codigo_cliente),
+            "condicion_entrega_id": condicion_entrega_id,
+            "fianza": fianza,
+            "score": best_attempt["score"],
+            "dice": best_attempt["dice"],
+            "iou": best_attempt["iou"],
+            "threshold": best_attempt["threshold"],
+            "document_match": {
+                "archivo": best_compared_signature["archivo"],
+                "s3_key": best_compared_signature["s3_key"],
+                "file_view_url": best_compared_signature["file_view_url"],
+                "page": best_compared_signature["page"],
+                "signature_index": best_compared_signature[
+                    "signature_index"
+                ],
+                "candidate_rank": best_compared_signature[
+                    "candidate_rank"
+                ],
+                "name_text": best_compared_signature["name_text"],
+                "name_text_source": best_compared_signature[
+                    "name_text_source"
+                ],
+                "name_match": best_compared_signature["name_match"],
+            },
+            "images": {
+                "camera_signature_base64": build_watermarked_signature_base64(
+                    camera_signature_crop
+                ),
+                "matched_document_signature_base64": build_watermarked_signature_base64(
+                    best_compared_signature["image"]
+                ),
+                "compared_document_signatures": compared_document_signatures,
+            },
+            "debug": {
+                "camera_signatures_detected": len(camera_detections),
+                "camera_detection": camera_detection_debug,
+                "client_name": client_name,
+                "client_name_source": ocr_name_info["source"],
+                "codigo_representante_legal": ocr_name_info[
+                    "codigo_representante_legal"
+                ],
+                "documents_found": len(documents),
+                "pdfs_read": pdfs_read,
+                "pages_with_signatures": pages_with_signatures,
+                "signatures_compared": signatures_compared,
+                "early_stop": False,
+                "best_compared_candidate": summarize_attempt(best_attempt),
+                "pdf_extraction": pdf_extraction_debug,
+                "errors": errors,
+                "debug_compare": best_attempt.get("debug_compare"),
+            },
+        }
+
+        audit_payload = build_audit_payload(
+            codigo_cliente=codigo_cliente,
+            documents=documents,
+            ocr_name_info=ocr_name_info,
+            status="auto_match",
+            match_automatico=True,
+            best_attempt=best_attempt,
+            errors=errors,
+            audit_documents=audit_documents,
+            condicion_entrega_id=condicion_entrega_id,
+            fianza=fianza,
+            camera_signature_image=camera_signature_crop,
+        )
+
+        return attach_audit(
+            result,
+            audit_payload,
+            background_tasks=background_tasks,
+        )
 
     result = {
         "ok": True,
         "match": False,
         "codigo_cliente": str(codigo_cliente),
+        "condicion_entrega_id": condicion_entrega_id,
+        "fianza": fianza,
         "message": "No se encontro coincidencia",
         "best_attempt": best_attempt,
         "images": {
             "camera_signature_base64": build_watermarked_signature_base64(
                 camera_signature_crop
             ),
-            "compared_document_signatures": [
-                {
-                    "archivo": item["archivo"],
-                    "s3_key": item["s3_key"],
-                    "file_view_url": item["file_view_url"],
-                    "page": item["page"],
-                    "signature_index": item["signature_index"],
-                    "candidate_rank": item["candidate_rank"],
-                    "name_text": item["name_text"],
-                    "name_text_source": item["name_text_source"],
-                    "name_match": item["name_match"],
-                    "score": item["score"],
-                    "dice": item["dice"],
-                    "iou": item["iou"],
-                    "threshold": item["threshold"],
-                    "document_signature_base64": build_watermarked_signature_base64(
-                        item["image"]
-                    ),
-                }
-                for item in compared_signatures
-            ],
+            "compared_document_signatures": compared_document_signatures,
         },
         "debug": {
             "camera_signatures_detected": len(camera_detections),
+            "camera_detection": camera_detection_debug,
             "client_name": client_name,
             "client_name_source": ocr_name_info["source"],
             "codigo_representante_legal": ocr_name_info[
@@ -566,6 +618,8 @@ def verify_signature(
         best_attempt=best_attempt,
         errors=errors,
         audit_documents=audit_documents,
+        condicion_entrega_id=condicion_entrega_id,
+        fianza=fianza,
         camera_signature_image=camera_signature_crop,
     )
 

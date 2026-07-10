@@ -260,6 +260,16 @@ def build_verification_list_item(row):
             if row["codigo_cliente"] is not None
             else None
         ),
+        "condicion_entrega_id": (
+            str(row["condicion_entrega_id"])
+            if row.get("condicion_entrega_id") is not None
+            else None
+        ),
+        "fianza": (
+            str(row["fianza"])
+            if row.get("fianza") is not None
+            else None
+        ),
         "nombre_cliente": row["nombre_cliente"],
         "status": row["status"],
         "estado": row["estado"],
@@ -400,6 +410,8 @@ def get_verifications(
                 v.ID AS verification_id,
                 v.CREATED_AT AS fecha,
                 v.CODIGO_CLIENTE AS codigo_cliente,
+                v.CONDICION_ENTREGA_ID AS condicion_entrega_id,
+                v.FIANZA AS fianza,
                 v.NOMBRE_CLIENTE AS nombre_cliente,
                 v.STATUS AS status,
                 v.ESTADO AS estado,
@@ -822,6 +834,8 @@ def get_verification_snapshot(verification_id: int):
                 ID,
                 MODELO_VERSION_ID,
                 CODIGO_CLIENTE,
+                CONDICION_ENTREGA_ID,
+                FIANZA,
                 CODIGO_REPRESENTANTE_LEGAL,
                 NOMBRE_CLIENTE,
                 NOMBRE_REPRESENTANTE_LEGAL,
@@ -989,6 +1003,10 @@ def get_verification_snapshot(verification_id: int):
                 "id": verification["id"],
                 "modelo_version_id": verification["modelo_version_id"],
                 "codigo_cliente": verification["codigo_cliente"],
+                "condicion_entrega_id": verification[
+                    "condicion_entrega_id"
+                ],
+                "fianza": verification["fianza"],
                 "codigo_representante_legal": verification[
                     "codigo_representante_legal"
                 ],
