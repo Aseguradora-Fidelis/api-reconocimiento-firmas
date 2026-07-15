@@ -322,7 +322,10 @@ def verify_signature(
 
     camera_signature_crop = camera_detections[0]["crop"]
 
-    documents = get_client_documents(codigo_cliente)
+    documents = get_client_documents(
+        codigo_cliente,
+        fianza=fianza,
+    )
 
     if not documents:
         result = {

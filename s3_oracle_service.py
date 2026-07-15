@@ -63,6 +63,7 @@ def get_connection():
 # =========================================================
 def get_client_documents(
     codigo_cliente: int,
+    fianza: int | None = None,
 ):
     conn = None
     cursor = None
@@ -91,7 +92,7 @@ def get_client_documents(
                     BLB."KEY" AS S3_KEY,
                     CLI.COD_CONTACTO AS CODIGO_CLIENTE,
                     main_fusa.pkg_doc_cg.obtener_representante_legal(
-                        NULL,
+                        :fianza,
                         CLI.COD_CONTACTO
                     ) AS CODIGO_REPRESENTANTE_LEGAL,
                     ARCH.VERSION
@@ -118,7 +119,10 @@ def get_client_documents(
 
         cursor.execute(
             query,
-            {"codigo_cliente": codigo_cliente},
+            {
+                "codigo_cliente": codigo_cliente,
+                "fianza": fianza,
+            },
         )
 
         rows = cursor.fetchall()
