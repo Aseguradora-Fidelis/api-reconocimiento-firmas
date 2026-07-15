@@ -96,6 +96,25 @@ SIGNATURE_TILE_MIN_DIM = int(
     os.getenv("SIGNATURE_TILE_MIN_DIM", "900")
 )
 
+# En una foto de camara, los tiles pueden detectar distintas partes de una
+# misma firma. Estas opciones permiten unir esas partes y conservar margen
+# alrededor de los trazos antes de enviarlos al comparador.
+CAMERA_SIGNATURE_MERGE_OVERLAP = float(
+    os.getenv("CAMERA_SIGNATURE_MERGE_OVERLAP", "0.15")
+)
+
+CAMERA_SIGNATURE_MERGE_GAP_RATIO = float(
+    os.getenv("CAMERA_SIGNATURE_MERGE_GAP_RATIO", "0.15")
+)
+
+CAMERA_SIGNATURE_PADDING_X = float(
+    os.getenv("CAMERA_SIGNATURE_PADDING_X", "0.08")
+)
+
+CAMERA_SIGNATURE_PADDING_Y = float(
+    os.getenv("CAMERA_SIGNATURE_PADDING_Y", "0.12")
+)
+
 # =========================================================
 # COMPARE
 # =========================================================

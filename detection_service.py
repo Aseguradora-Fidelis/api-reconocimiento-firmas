@@ -8,6 +8,10 @@ import numpy as np
 from ultralytics import YOLO
 
 from config import (
+    CAMERA_SIGNATURE_MERGE_GAP_RATIO,
+    CAMERA_SIGNATURE_MERGE_OVERLAP,
+    CAMERA_SIGNATURE_PADDING_X,
+    CAMERA_SIGNATURE_PADDING_Y,
     DEBUG_SAVE_FILES,
     SIGNATURE_BEST_CONFIDENCE_RATIO,
     SIGNATURE_DETECTION_DEBUG,
@@ -488,6 +492,125 @@ def detection_duplicate_reason(det, kept, iou_threshold, containment_threshold):
     return None, iou, containment
 
 
+def axis_overlap_ratio(a1, a2, b1, b2):
+    overlap = max(0, min(a2, b2) - max(a1, b1))
+    smaller = min(max(0, a2 - a1), max(0, b2 - b1))
+
+    if smaller <= 0:
+        return 0.0
+
+    return float(overlap / smaller)
+
+
+def camera_boxes_belong_together(a: dict, b: dict):
+    horizontal_overlap = axis_overlap_ratio(
+        a["x1"], a["x2"], b["x1"], b["x2"]
+    )
+    vertical_overlap = axis_overlap_ratio(
+        a["y1"], a["y2"], b["y1"], b["y2"]
+    )
+
+    if (
+        horizontal_overlap >= CAMERA_SIGNATURE_MERGE_OVERLAP
+        and vertical_overlap >= CAMERA_SIGNATURE_MERGE_OVERLAP
+    ):
+        return True
+
+    horizontal_gap = max(a["x1"], b["x1"]) - min(a["x2"], b["x2"])
+    vertical_gap = max(a["y1"], b["y1"]) - min(a["y2"], b["y2"])
+    max_width = max(a["x2"] - a["x1"], b["x2"] - b["x1"])
+    max_height = max(a["y2"] - a["y1"], b["y2"] - b["y1"])
+
+    horizontally_close = horizontal_gap <= (
+        max_width * CAMERA_SIGNATURE_MERGE_GAP_RATIO
+    )
+    vertically_close = vertical_gap <= (
+        max_height * CAMERA_SIGNATURE_MERGE_GAP_RATIO
+    )
+
+    return (
+        vertical_overlap >= CAMERA_SIGNATURE_MERGE_OVERLAP
+        and horizontally_close
+    ) or (
+        horizontal_overlap >= CAMERA_SIGNATURE_MERGE_OVERLAP
+        and vertically_close
+    )
+
+
+def consolidate_camera_signature(img, detections):
+    """Une las cajas conectadas a la mejor deteccion de la camara."""
+    if not detections:
+        return [], 0
+
+    anchor = max(
+        detections,
+        key=lambda item: float(item.get("confidence") or 0.0),
+    )
+    cluster = [anchor]
+    pending = [det for det in detections if det is not anchor]
+
+    changed = True
+
+    while changed:
+        changed = False
+
+        for det in pending[:]:
+            if any(
+                camera_boxes_belong_together(det["bbox"], item["bbox"])
+                for item in cluster
+            ):
+                cluster.append(det)
+                pending.remove(det)
+                changed = True
+
+    union_x1 = min(item["bbox"]["x1"] for item in cluster)
+    union_y1 = min(item["bbox"]["y1"] for item in cluster)
+    union_x2 = max(item["bbox"]["x2"] for item in cluster)
+    union_y2 = max(item["bbox"]["y2"] for item in cluster)
+    union_width = union_x2 - union_x1
+    union_height = union_y2 - union_y1
+    pad_x = int(round(union_width * CAMERA_SIGNATURE_PADDING_X))
+    pad_y = int(round(union_height * CAMERA_SIGNATURE_PADDING_Y))
+    height, width = img.shape[:2]
+    x1, y1, x2, y2 = clamp_bbox(
+        union_x1 - pad_x,
+        union_y1 - pad_y,
+        union_x2 + pad_x,
+        union_y2 + pad_y,
+        width,
+        height,
+    )
+    crop = img[y1:y2, x1:x2].copy()
+
+    if crop is None or crop.size == 0:
+        return [anchor], len(cluster)
+
+    merged = {
+        "bbox": {
+            "x1": int(x1),
+            "y1": int(y1),
+            "x2": int(x2),
+            "y2": int(y2),
+        },
+        "confidence": round(
+            max(float(item.get("confidence") or 0.0) for item in cluster),
+            4,
+        ),
+        "class_id": anchor.get("class_id"),
+        "class_name": anchor.get("class_name"),
+        "source_variant": "camera_merged",
+        # Para camara no se aplica tight_signature_crop: el preprocesamiento
+        # del comparador ya recorta el contenido y aqui debemos conservar
+        # todos los trazos detectados.
+        "crop": crop,
+        "raw_crop": crop.copy(),
+        "merged_detection_count": len(cluster),
+        "merged_boxes": [item["bbox"].copy() for item in cluster],
+    }
+
+    return [merged], len(cluster)
+
+
 def detect_yolo(
     img: np.ndarray,
     variant_name="original",
@@ -835,6 +958,87 @@ def save_detection_debug_image(
     return str(output_path)
 
 
+def save_camera_original_debug_image(
+    img,
+    pre_nms_detections,
+    selected_detections,
+    debug_context=None,
+):
+    """Guarda una vista limpia de lo reconocido sobre la foto original."""
+    if (
+        not DEBUG_SAVE_FILES
+        or not SIGNATURE_DETECTION_DEBUG
+        or not debug_context
+        or debug_context.get("source") != "camera"
+    ):
+        return None
+
+    output_dir = Path(SIGNATURE_DETECTION_DEBUG_DIR)
+    output_dir.mkdir(parents=True, exist_ok=True)
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
+    output_path = output_dir / (
+        f"{timestamp}_camera_original_recognized.jpg"
+    )
+    canvas = img.copy()
+    original_detections = [
+        det
+        for det in pre_nms_detections
+        if det.get("source_variant") == "original"
+    ]
+
+    for idx, det in enumerate(original_detections, start=1):
+        bbox = det["bbox"]
+        cv2.rectangle(
+            canvas,
+            (bbox["x1"], bbox["y1"]),
+            (bbox["x2"], bbox["y2"]),
+            (0, 165, 255),
+            2,
+        )
+        cv2.putText(
+            canvas,
+            f"ORIGINAL {idx} {det['confidence']:.2f}",
+            (bbox["x1"], max(18, bbox["y1"] - 7)),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.6,
+            (0, 125, 255),
+            2,
+            cv2.LINE_AA,
+        )
+
+    for idx, det in enumerate(selected_detections, start=1):
+        bbox = det["bbox"]
+        cv2.rectangle(
+            canvas,
+            (bbox["x1"], bbox["y1"]),
+            (bbox["x2"], bbox["y2"]),
+            (0, 255, 0),
+            3,
+        )
+        cv2.putText(
+            canvas,
+            f"FIRMA COMPLETA {idx}",
+            (bbox["x1"], min(canvas.shape[0] - 8, bbox["y2"] + 22)),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.65,
+            (0, 160, 0),
+            2,
+            cv2.LINE_AA,
+        )
+
+    cv2.imwrite(str(output_path), canvas)
+    logger.info(
+        "Debug de camara original guardado context=%s path=%s "
+        "original_count=%s final_count=%s",
+        context_label(debug_context),
+        output_path,
+        len(original_detections),
+        len(selected_detections),
+    )
+
+    return str(output_path)
+
+
 def summarize_final_detection(det):
     bbox = det["bbox"]
 
@@ -846,6 +1050,8 @@ def summarize_final_detection(det):
         "source_variant": det.get("source_variant"),
         "width": bbox["x2"] - bbox["x1"],
         "height": bbox["y2"] - bbox["y1"],
+        "merged_detection_count": det.get("merged_detection_count", 1),
+        "merged_boxes": det.get("merged_boxes"),
     }
 
 
@@ -969,14 +1175,35 @@ def detect_signatures(
         debug_context=debug_context,
     )
     post_nms_count = len(selected)
-    selected, best_min_confidence, best_dropped_count = (
-        filter_best_confidence_detections(
-            selected,
-            debug_context=debug_context,
-        )
+    is_camera = bool(
+        debug_context and debug_context.get("source") == "camera"
     )
+    camera_merged_detection_count = 0
+
+    if is_camera:
+        selected, camera_merged_detection_count = (
+            consolidate_camera_signature(img, selected)
+        )
+        best_min_confidence = None
+        best_dropped_count = max(
+            0,
+            post_nms_count - camera_merged_detection_count,
+        )
+    else:
+        selected, best_min_confidence, best_dropped_count = (
+            filter_best_confidence_detections(
+                selected,
+                debug_context=debug_context,
+            )
+        )
 
     debug_image_path = save_detection_debug_image(
+        img,
+        all_detections,
+        selected,
+        debug_context=debug_context,
+    )
+    camera_original_debug_image_path = save_camera_original_debug_image(
         img,
         all_detections,
         selected,
@@ -1022,6 +1249,12 @@ def detect_signatures(
         "nms_iou_threshold": SIGNATURE_DEDUP_IOU_THRESHOLD,
         "nms_containment_threshold": SIGNATURE_DEDUP_CONTAINMENT_THRESHOLD,
         "debug_image_path": debug_image_path,
+        "camera_original_debug_image_path": (
+            camera_original_debug_image_path
+        ),
+        "camera_merged_detection_count": (
+            camera_merged_detection_count
+        ),
         "final_boxes": [
             summarize_final_detection(det)
             for det in selected

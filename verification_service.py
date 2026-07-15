@@ -1,7 +1,12 @@
 from audit_service import persist_verification_audit
 from compare_service import compare_signatures
 from detection_service import detect_signatures
-from pdf_service import extract_signature_candidates_from_pdf
+from pdf_service import (
+    extract_ocr_text,
+    extract_signature_candidates_from_pdf,
+    name_tokens,
+    normalize_text,
+)
 from s3_oracle_service import (
     get_client_documents,
     get_pdf_from_s3,
@@ -46,37 +51,124 @@ def summarize_attempt(attempt):
         "name_text": attempt.get("name_text"),
         "name_text_source": attempt.get("name_text_source"),
         "name_match": attempt.get("name_match"),
+        "visual_match": attempt.get("visual_match"),
+        "name_eligible": attempt.get("name_eligible"),
+        "match": attempt.get("match"),
     }
 
 
-def resolve_ocr_client_name(documents):
-    for document in documents:
-        name = document.get("nombre_representante_legal")
+def resolve_ocr_client_name(documents, camera_signature=None):
+    references = []
+    seen_names = set()
+    representative_code = None
 
-        if name:
-            return {
+    for document in documents:
+        for field, source in (
+            ("nombre_representante_legal", "representante_legal"),
+            ("nombre_cliente", "nombre_cliente"),
+        ):
+            name = document.get(field)
+            normalized = normalize_text(name)
+
+            # Valores placeholder como "." no son nombres utilizables.
+            if not normalized or not name_tokens(name):
+                continue
+
+            if normalized in seen_names:
+                continue
+
+            seen_names.add(normalized)
+            references.append({
                 "name": name,
-                "source": "representante_legal",
-                "codigo_representante_legal": document.get(
+                "source": source,
+            })
+
+            if source == "representante_legal":
+                representative_code = document.get(
                     "codigo_representante_legal"
-                ),
-            }
+                )
 
-    for document in documents:
-        name = document.get("nombre_cliente")
+    if references:
+        sources = {item["source"] for item in references}
+        source = (
+            "cliente_y_representante_legal"
+            if len(sources) > 1
+            else references[0]["source"]
+        )
 
-        if name:
+        return {
+            "name": references[0]["name"],
+            "names": [item["name"] for item in references],
+            "name_references": references,
+            "source": source,
+            "codigo_representante_legal": representative_code,
+            "camera_ocr_text": None,
+            "camera_ocr_error": None,
+        }
+
+    camera_ocr_text = ""
+    camera_ocr_error = None
+
+    if camera_signature is not None:
+        camera_ocr_text, camera_ocr_error = extract_ocr_text(
+            camera_signature
+        )
+        camera_tokens = name_tokens(camera_ocr_text)
+
+        if (
+            len(camera_tokens) >= 3
+            and sum(len(token) for token in camera_tokens) >= 12
+        ):
             return {
-                "name": name,
-                "source": "cliente_fallback",
+                "name": camera_ocr_text,
+                "names": [camera_ocr_text],
+                "name_references": [{
+                    "name": camera_ocr_text,
+                    "source": "camera_ocr_fallback",
+                }],
+                "source": "camera_ocr_fallback",
                 "codigo_representante_legal": None,
+                "camera_ocr_text": camera_ocr_text,
+                "camera_ocr_error": camera_ocr_error,
             }
 
     return {
         "name": None,
+        "names": [],
+        "name_references": [],
         "source": None,
         "codigo_representante_legal": None,
+        "camera_ocr_text": camera_ocr_text or None,
+        "camera_ocr_error": camera_ocr_error,
     }
+
+
+def name_status_priority(name_match, name_required):
+    if not name_required:
+        return 0
+
+    status = (name_match or {}).get("status")
+
+    return {
+        "match": 2,
+        "unknown": 1,
+        "not_available": 1,
+        "mismatch": 0,
+    }.get(status, 1)
+
+
+def candidate_selection_key(name_match, score, name_required):
+    return (
+        name_status_priority(name_match, name_required),
+        float(score),
+    )
+
+
+def name_is_eligible(name_match, name_required):
+    if not name_required:
+        return True
+
+    return (name_match or {}).get("status") == "match"
 
 
 def first_document_value(documents, key):
@@ -288,10 +380,16 @@ def verify_signature(
     audit_documents = []
     best_audit_candidate = None
     best_compared_signature = None
+    best_selection_key = None
     has_match = False
 
-    ocr_name_info = resolve_ocr_client_name(documents)
+    ocr_name_info = resolve_ocr_client_name(
+        documents,
+        camera_signature=camera_signature_crop,
+    )
     client_name = ocr_name_info["name"]
+    client_names = ocr_name_info["names"]
+    name_required = bool(client_names)
 
     def resolve_file_view_url(s3_key):
         if s3_key not in file_view_urls:
@@ -331,7 +429,7 @@ def verify_signature(
             extracted = extract_signature_candidates_from_pdf(
                 pdf_buffer=pdf_buffer,
                 stop_at_first_page=False,
-                client_name=client_name,
+                client_name=client_names,
                 debug_context={
                     "archivo": archivo,
                     "s3_key": s3_key,
@@ -414,9 +512,17 @@ def verify_signature(
                 continue
 
             signatures_compared += 1
+            visual_match = bool(compare_result["match"])
+            name_eligible = name_is_eligible(
+                name_match,
+                name_required,
+            )
+            effective_match = visual_match and name_eligible
             candidate_audit["compared"] = True
             candidate_audit["compare_result"] = {
-                "match": compare_result["match"],
+                "match": effective_match,
+                "visual_match": visual_match,
+                "name_eligible": name_eligible,
                 "score": compare_result["score"],
                 "dice": compare_result["dice"],
                 "iou": compare_result["iou"],
@@ -436,7 +542,9 @@ def verify_signature(
                 "name_text": signature.get("name_text"),
                 "name_text_source": signature.get("name_text_source"),
                 "name_match": name_match,
-                "match": compare_result["match"],
+                "match": effective_match,
+                "visual_match": visual_match,
+                "name_eligible": name_eligible,
                 "score": compare_result["score"],
                 "dice": compare_result["dice"],
                 "iou": compare_result["iou"],
@@ -444,16 +552,22 @@ def verify_signature(
                 "image": document_signature.copy(),
             }
             compared_signatures.append(compared_signature)
+            selection_key = candidate_selection_key(
+                name_match,
+                score,
+                name_required,
+            )
 
             if (
                 best_audit_candidate is None
-                or score > best_attempt["score"]
+                or selection_key > best_selection_key
             ):
                 if best_audit_candidate is not None:
                     best_audit_candidate["is_best"] = False
 
                 candidate_audit["is_best"] = True
                 best_audit_candidate = candidate_audit
+                best_selection_key = selection_key
 
                 best_attempt = {
                     "score": compare_result["score"],
@@ -469,11 +583,14 @@ def verify_signature(
                     "name_text": signature.get("name_text"),
                     "name_text_source": signature.get("name_text_source"),
                     "name_match": name_match,
+                    "visual_match": visual_match,
+                    "name_eligible": name_eligible,
+                    "match": effective_match,
                     "debug_compare": compare_result.get("debug_compare"),
                 }
                 best_compared_signature = compared_signature
 
-            if compare_result["match"]:
+            if effective_match:
                 has_match = True
 
     compared_document_signatures = [
@@ -488,6 +605,8 @@ def verify_signature(
             "name_text_source": item["name_text_source"],
             "name_match": item["name_match"],
             "match": item["match"],
+            "visual_match": item["visual_match"],
+            "name_eligible": item["name_eligible"],
             "score": item["score"],
             "dice": item["dice"],
             "iou": item["iou"],
@@ -540,7 +659,18 @@ def verify_signature(
                 "camera_signatures_detected": len(camera_detections),
                 "camera_detection": camera_detection_debug,
                 "client_name": client_name,
+                "client_names": client_names,
+                "client_name_references": ocr_name_info.get(
+                    "name_references"
+                ),
                 "client_name_source": ocr_name_info["source"],
+                "camera_name_ocr_text": ocr_name_info.get(
+                    "camera_ocr_text"
+                ),
+                "camera_name_ocr_error": ocr_name_info.get(
+                    "camera_ocr_error"
+                ),
+                "name_required_for_match": name_required,
                 "codigo_representante_legal": ocr_name_info[
                     "codigo_representante_legal"
                 ],
@@ -594,7 +724,18 @@ def verify_signature(
             "camera_signatures_detected": len(camera_detections),
             "camera_detection": camera_detection_debug,
             "client_name": client_name,
+            "client_names": client_names,
+            "client_name_references": ocr_name_info.get(
+                "name_references"
+            ),
             "client_name_source": ocr_name_info["source"],
+            "camera_name_ocr_text": ocr_name_info.get(
+                "camera_ocr_text"
+            ),
+            "camera_name_ocr_error": ocr_name_info.get(
+                "camera_ocr_error"
+            ),
+            "name_required_for_match": name_required,
             "codigo_representante_legal": ocr_name_info[
                 "codigo_representante_legal"
             ],

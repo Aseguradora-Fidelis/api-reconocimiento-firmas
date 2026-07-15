@@ -50,6 +50,27 @@ NAME_STOPWORDS = {
     "lugar",
     "documento",
     "identificacion",
+    "propietaria",
+    "perito",
+    "contador",
+    "contadora",
+    "colegiado",
+    "guatemala",
+    "san",
+    "miguel",
+    "petapa",
+    "enero",
+    "febrero",
+    "marzo",
+    "abril",
+    "mayo",
+    "junio",
+    "julio",
+    "agosto",
+    "septiembre",
+    "octubre",
+    "noviembre",
+    "diciembre",
 }
 
 
@@ -77,11 +98,15 @@ def name_tokens(value):
     return [
         token
         for token in normalized.split()
-        if len(token) >= 3 and token not in NAME_STOPWORDS
+        if (
+            len(token) >= 3
+            and token.isalpha()
+            and token not in NAME_STOPWORDS
+        )
     ]
 
 
-def match_client_name(text, client_name):
+def match_single_client_name(text, client_name):
     client_normalized = normalize_text(client_name)
     text_normalized = normalize_text(text)
 
@@ -102,7 +127,7 @@ def match_client_name(text, client_name):
         }
 
     client_tokens = name_tokens(client_name)
-    text_tokens = set(name_tokens(text))
+    text_tokens = name_tokens(text)
 
     if not text_tokens:
         return {
@@ -120,15 +145,34 @@ def match_client_name(text, client_name):
             "matched_tokens": client_tokens,
         }
 
-    matched_tokens = [
-        token
-        for token in client_tokens
-        if token in text_tokens
-    ]
+    unmatched_text_tokens = list(text_tokens)
+    matched_tokens = []
+
+    # El OCR suele cambiar una letra (Aceituno/Accituno). Se compara cada
+    # token una sola vez y se aceptan variaciones pequenas.
+    for client_token in client_tokens:
+        best_index = None
+        best_ratio = 0.0
+
+        for index, text_token in enumerate(unmatched_text_tokens):
+            ratio = SequenceMatcher(
+                None,
+                client_token,
+                text_token,
+            ).ratio()
+
+            if ratio > best_ratio:
+                best_ratio = ratio
+                best_index = index
+
+        if best_index is not None and best_ratio >= 0.82:
+            matched_tokens.append(client_token)
+            unmatched_text_tokens.pop(best_index)
 
     token_score = 0.0
-    if client_tokens:
-        token_score = len(matched_tokens) / len(client_tokens)
+    token_denominator = min(len(client_tokens), len(text_tokens))
+    if token_denominator:
+        token_score = len(matched_tokens) / token_denominator
 
     ratio_score = SequenceMatcher(
         None,
@@ -136,7 +180,18 @@ def match_client_name(text, client_name):
         text_normalized,
     ).ratio()
 
-    score = max(token_score, ratio_score)
+    # Cuando una firma cruza el nombre impreso, Tesseract puede partir
+    # "ACEITUNO" como "ACEIT INO". Al comparar tambien los tokens unidos
+    # conservamos la secuencia del nombre sin depender de esos espacios.
+    compact_client = "".join(client_tokens)
+    compact_text = "".join(text_tokens)
+    compact_score = SequenceMatcher(
+        None,
+        compact_client,
+        compact_text,
+    ).ratio()
+
+    score = max(token_score, ratio_score, compact_score)
 
     minimum_matches = 1
     if len(client_tokens) > 1:
@@ -152,7 +207,54 @@ def match_client_name(text, client_name):
         "match": bool(is_match),
         "score": round(float(score), 4),
         "matched_tokens": matched_tokens,
+        "matched_reference": client_name if is_match else None,
     }
+
+
+def match_client_name(text, client_name):
+    if not isinstance(client_name, (list, tuple, set)):
+        result = match_single_client_name(text, client_name)
+        result.setdefault(
+            "matched_reference",
+            client_name if result.get("match") else None,
+        )
+        return result
+
+    references = [
+        reference
+        for reference in client_name
+        if normalize_text(reference) and name_tokens(reference)
+    ]
+
+    if not references:
+        return match_single_client_name(text, None)
+
+    status_priority = {
+        "match": 3,
+        "unknown": 2,
+        "mismatch": 1,
+        "not_available": 0,
+    }
+    results = []
+
+    for reference in references:
+        result = match_single_client_name(text, reference)
+        result["reference"] = reference
+        result["matched_reference"] = (
+            reference if result.get("match") else None
+        )
+        results.append(result)
+
+    best = max(
+        results,
+        key=lambda item: (
+            status_priority.get(item.get("status"), 0),
+            float(item.get("score") or 0.0),
+        ),
+    )
+    best["references_evaluated"] = len(results)
+
+    return best
 
 
 def render_page_to_image(page, dpi: int = PDF_DPI):
@@ -389,7 +491,7 @@ def pdf_to_images(pdf_buffer: BytesIO, dpi: int = PDF_DPI):
 def extract_signature_candidates_from_pdf(
     pdf_buffer: BytesIO,
     stop_at_first_page: bool = False,
-    client_name: str | None = None,
+    client_name: str | list[str] | None = None,
     max_pages_to_scan: int = PDF_MAX_PAGES_TO_SCAN,
     max_signatures_to_compare: int = PDF_MAX_SIGNATURES_TO_COMPARE,
     max_signatures_per_page: int = PDF_MAX_SIGNATURES_PER_PAGE,
