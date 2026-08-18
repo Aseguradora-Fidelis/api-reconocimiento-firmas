@@ -23,7 +23,7 @@ def env_bool(name, default=False):
 # GENERAL
 # =========================================================
 API_VERSION = "4.0.0"
-DEBUG_SAVE_FILES = True
+DEBUG_SAVE_FILES = False
 DEBUG_DIR = "debug_verify"
 
 # =========================================================
