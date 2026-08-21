@@ -1,4 +1,5 @@
 import logging
+from time import perf_counter
 
 from audit_service import persist_verification_audit
 from compare_service import compare_signatures
@@ -17,7 +18,9 @@ from s3_oracle_service import (
 from watermark import build_watermarked_base64, build_watermarked_signature_base64
 
 
-logger = logging.getLogger(__name__)
+# Comparte el handler visible de Uvicorn; los loggers de modulo con INFO pueden
+# quedar filtrados por el logger raiz dependiendo de como se inicia el servicio.
+logger = logging.getLogger("uvicorn.error")
 
 
 def flatten_pdf_results(pdf_results):
@@ -252,10 +255,18 @@ def attach_audit(
     audit_payload,
     background_tasks=None,
 ):
+    started_at = perf_counter()
     audit_result = persist_verification_audit(
         audit_payload,
         result,
         background_tasks=background_tasks,
+    )
+    logger.info(
+        "verificacion auditoria saved=%s verification_id=%s "
+        "duration_ms=%.1f",
+        audit_result.get("saved"),
+        audit_result.get("verification_id"),
+        (perf_counter() - started_at) * 1000,
     )
 
     result.setdefault("debug", {})["audit"] = audit_result
@@ -270,6 +281,7 @@ def verify_signature(
     fianza: int | None = None,
     background_tasks=None,
 ):
+    pipeline_started_at = perf_counter()
     logger.info(
         "verificacion pipeline inicio codigo_cliente=%s "
         "condicion_entrega_id=%s fianza=%s",
@@ -277,12 +289,20 @@ def verify_signature(
         condicion_entrega_id,
         fianza,
     )
+    camera_detection_started_at = perf_counter()
     camera_detections, camera_detection_debug = detect_signatures(
         camera_signature,
         debug_context={
             "source": "camera",
         },
         return_debug=True,
+    )
+    logger.info(
+        "verificacion deteccion_camara codigo_cliente=%s detections=%s "
+        "duration_ms=%.1f",
+        codigo_cliente,
+        len(camera_detections),
+        (perf_counter() - camera_detection_started_at) * 1000,
     )
 
     if not camera_detections:
@@ -338,15 +358,18 @@ def verify_signature(
 
     camera_signature_crop = camera_detections[0]["crop"]
 
+    documents_started_at = perf_counter()
     documents = get_client_documents(
         codigo_cliente,
         fianza=fianza,
     )
 
     logger.info(
-        "verificacion documentos_consultados codigo_cliente=%s total=%s",
+        "verificacion documentos_consultados codigo_cliente=%s total=%s "
+        "duration_ms=%.1f",
         codigo_cliente,
         len(documents),
+        (perf_counter() - documents_started_at) * 1000,
     )
 
     if not documents:
@@ -403,6 +426,7 @@ def verify_signature(
     pdfs_read = 0
     pages_with_signatures = 0
     signatures_compared = 0
+    comparison_ms = 0.0
     errors = []
     compared_signatures = []
     file_view_urls = {}
@@ -456,7 +480,17 @@ def verify_signature(
             archivo,
         )
 
+        s3_started_at = perf_counter()
         pdf_buffer = get_pdf_from_s3(s3_key)
+        logger.info(
+            "verificacion pdf_descargado codigo_cliente=%s documento=%s/%s "
+            "available=%s duration_ms=%.1f",
+            codigo_cliente,
+            document_index,
+            len(documents),
+            pdf_buffer is not None,
+            (perf_counter() - s3_started_at) * 1000,
+        )
 
         if pdf_buffer is None:
             errors.append(f"No se pudo leer PDF S3: {s3_key}")
@@ -472,6 +506,7 @@ def verify_signature(
 
         pdfs_read += 1
 
+        extraction_started_at = perf_counter()
         try:
             extracted = extract_signature_candidates_from_pdf(
                 pdf_buffer=pdf_buffer,
@@ -515,11 +550,12 @@ def verify_signature(
         candidates = flatten_pdf_results(pdf_results)
         logger.info(
             "verificacion documento_analizado codigo_cliente=%s archivo=%r "
-            "pages_with_signatures=%s candidates=%s",
+            "pages_with_signatures=%s candidates=%s extraction_ms=%.1f",
             codigo_cliente,
             archivo,
             len(candidate_pages),
             len(candidates),
+            (perf_counter() - extraction_started_at) * 1000,
         )
         candidate_audits = {}
 
@@ -550,6 +586,7 @@ def verify_signature(
                 )
             ]
 
+            comparison_started_at = perf_counter()
             try:
                 compare_result = compare_signatures(
                     camera_signature_crop,
@@ -565,6 +602,9 @@ def verify_signature(
                     },
                 )
             except Exception as e:
+                comparison_ms += (
+                    perf_counter() - comparison_started_at
+                ) * 1000
                 errors.append(
                     f"Error comparando {archivo} pagina {page_number} "
                     f"firma {signature_index}: {e}"
@@ -578,6 +618,10 @@ def verify_signature(
                     signature_index,
                 )
                 continue
+
+            comparison_ms += (
+                perf_counter() - comparison_started_at
+            ) * 1000
 
             signatures_compared += 1
             visual_match = bool(compare_result["match"])
@@ -690,14 +734,17 @@ def verify_signature(
         logger.info(
             "verificacion resultado codigo_cliente=%s match=true "
             "documents=%s pdfs_read=%s pages_with_signatures=%s "
-            "signatures_compared=%s errors=%s best_score=%s",
+            "signatures_compared=%s comparison_ms=%.1f errors=%s "
+            "best_score=%s total_ms=%.1f",
             codigo_cliente,
             len(documents),
             pdfs_read,
             pages_with_signatures,
             signatures_compared,
+            comparison_ms,
             len(errors),
             best_attempt["score"],
+            (perf_counter() - pipeline_started_at) * 1000,
         )
         result = {
             "ok": True,
@@ -789,14 +836,16 @@ def verify_signature(
     logger.info(
         "verificacion resultado codigo_cliente=%s match=false documents=%s "
         "pdfs_read=%s pages_with_signatures=%s signatures_compared=%s "
-        "errors=%s best_score=%s",
+        "comparison_ms=%.1f errors=%s best_score=%s total_ms=%.1f",
         codigo_cliente,
         len(documents),
         pdfs_read,
         pages_with_signatures,
         signatures_compared,
+        comparison_ms,
         len(errors),
         best_attempt["score"],
+        (perf_counter() - pipeline_started_at) * 1000,
     )
 
     result = {

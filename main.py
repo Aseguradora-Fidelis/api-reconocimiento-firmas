@@ -46,7 +46,10 @@ from s3_oracle_service import (
 )
 
 
-logger = logging.getLogger(__name__)
+# Uvicorn configura sus propios handlers y deja el logger raiz en WARNING.
+# Usar este logger garantiza que los eventos INFO de negocio sean visibles
+# junto al access log cuando la API se ejecuta con uvicorn.
+logger = logging.getLogger("uvicorn.error")
 
 # =========================================================
 # VALIDATE CONFIG
@@ -226,22 +229,54 @@ def verification_stats_endpoint(
     fecha_inicio: str,
     fecha_fin: str,
 ):
+    started_at = perf_counter()
+    logger.info(
+        "verification-stats consulta fecha_inicio=%s fecha_fin=%s",
+        fecha_inicio,
+        fecha_fin,
+    )
+
     try:
         fecha_inicio = normalize_date_param(fecha_inicio)
         fecha_fin = normalize_date_param(fecha_fin)
 
-        return get_verification_stats(
+        result = get_verification_stats(
             fecha_inicio=fecha_inicio,
             fecha_fin=fecha_fin,
         )
+        logger.info(
+            "verification-stats resultado fecha_inicio=%s fecha_fin=%s "
+            "total_validaciones=%s clientes_distintos=%s errores=%s "
+            "duration_ms=%.1f",
+            fecha_inicio,
+            fecha_fin,
+            result.get("total_validaciones"),
+            result.get("clientes_distintos"),
+            result.get("errores"),
+            (perf_counter() - started_at) * 1000,
+        )
+        return result
 
     except ValueError as e:
+        logger.warning(
+            "verification-stats parametros_invalidos error=%s "
+            "duration_ms=%.1f",
+            e,
+            (perf_counter() - started_at) * 1000,
+        )
         raise HTTPException(
             status_code=400,
             detail=str(e),
         )
 
     except Exception as e:
+        logger.exception(
+            "verification-stats error fecha_inicio=%s fecha_fin=%s "
+            "duration_ms=%.1f",
+            fecha_inicio,
+            fecha_fin,
+            (perf_counter() - started_at) * 1000,
+        )
         raise HTTPException(
             status_code=500,
             detail=f"Error interno consultando estadisticas: {str(e)}",
@@ -253,22 +288,54 @@ def verification_stats_daily_endpoint(
     fecha_inicio: str,
     fecha_fin: str,
 ):
+    started_at = perf_counter()
+    logger.info(
+        "verification-stats-daily consulta fecha_inicio=%s fecha_fin=%s",
+        fecha_inicio,
+        fecha_fin,
+    )
+
     try:
         fecha_inicio = normalize_date_param(fecha_inicio)
         fecha_fin = normalize_date_param(fecha_fin)
 
-        return get_verification_stats_daily(
+        result = get_verification_stats_daily(
             fecha_inicio=fecha_inicio,
             fecha_fin=fecha_fin,
         )
+        items = result.get("items") or []
+        logger.info(
+            "verification-stats-daily resultado fecha_inicio=%s "
+            "fecha_fin=%s dias=%s total_validaciones=%s "
+            "duration_ms=%.1f",
+            fecha_inicio,
+            fecha_fin,
+            len(items),
+            sum(item.get("total_validaciones") or 0 for item in items),
+            (perf_counter() - started_at) * 1000,
+        )
+        return result
 
     except ValueError as e:
+        logger.warning(
+            "verification-stats-daily parametros_invalidos error=%s "
+            "duration_ms=%.1f",
+            e,
+            (perf_counter() - started_at) * 1000,
+        )
         raise HTTPException(
             status_code=400,
             detail=str(e),
         )
 
     except Exception as e:
+        logger.exception(
+            "verification-stats-daily error fecha_inicio=%s fecha_fin=%s "
+            "duration_ms=%.1f",
+            fecha_inicio,
+            fecha_fin,
+            (perf_counter() - started_at) * 1000,
+        )
         raise HTTPException(
             status_code=500,
             detail=f"Error interno consultando estadisticas diarias: {str(e)}",

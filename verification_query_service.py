@@ -1,5 +1,6 @@
 import logging
 import json
+from time import perf_counter
 
 import oracledb
 
@@ -15,7 +16,7 @@ from watermark import (
 )
 
 
-logger = logging.getLogger(__name__)
+logger = logging.getLogger("uvicorn.error")
 
 ACTIVE_VERIFICATION_STATE = "A"
 INACTIVE_VERIFICATION_STATE = "I"
@@ -822,8 +823,10 @@ def save_user_validation(
 def get_verification_snapshot(verification_id: int):
     conn = None
     cursor = None
+    started_at = perf_counter()
 
     try:
+        database_started_at = perf_counter()
         conn = get_connection()
         cursor = conn.cursor()
 
@@ -960,6 +963,17 @@ def get_verification_snapshot(verification_id: int):
             """,
             {"verification_id": verification_id},
         )
+        database_ms = (perf_counter() - database_started_at) * 1000
+        logger.info(
+            "verification snapshot datos verification_id=%s documents=%s "
+            "candidates=%s images=%s validation_found=%s database_ms=%.1f",
+            verification_id,
+            len(documents),
+            len(candidates),
+            len(images),
+            validation is not None,
+            database_ms,
+        )
 
         document_map = {}
         candidate_map = {}
@@ -979,9 +993,21 @@ def get_verification_snapshot(verification_id: int):
                 document["candidates"].append(candidate)
 
         camera_images = []
+        images_started_at = perf_counter()
         for row in images:
+            image_started_at = perf_counter()
             image = build_image(row)
             candidate_id = image["candidate_id"]
+            logger.info(
+                "verification snapshot imagen verification_id=%s image_id=%s "
+                "type=%s candidate_id=%s ready=%s duration_ms=%.1f",
+                verification_id,
+                image["id"],
+                image["type"],
+                candidate_id,
+                image["watermarked"],
+                (perf_counter() - image_started_at) * 1000,
+            )
 
             if candidate_id is None:
                 camera_images.append(image)
@@ -996,6 +1022,16 @@ def get_verification_snapshot(verification_id: int):
 
         if best_candidate_id:
             best_candidate = candidate_map.get(best_candidate_id)
+
+        images_ms = (perf_counter() - images_started_at) * 1000
+        logger.info(
+            "verification snapshot construido verification_id=%s "
+            "database_ms=%.1f images_ms=%.1f total_ms=%.1f",
+            verification_id,
+            database_ms,
+            images_ms,
+            (perf_counter() - started_at) * 1000,
+        )
 
         return {
             "ok": True,
