@@ -13,6 +13,7 @@ from config import (
     PDF_MAX_PAGES_TO_SCAN,
     PDF_MAX_SIGNATURES_TO_COMPARE,
     PDF_MAX_SIGNATURES_PER_PAGE,
+    PDF_STOP_WHEN_SIGNATURE_LIMIT_REACHED,
     PDF_NAME_MATCH_THRESHOLD,
     PDF_OCR_LANG,
 )
@@ -495,6 +496,9 @@ def extract_signature_candidates_from_pdf(
     max_pages_to_scan: int = PDF_MAX_PAGES_TO_SCAN,
     max_signatures_to_compare: int = PDF_MAX_SIGNATURES_TO_COMPARE,
     max_signatures_per_page: int = PDF_MAX_SIGNATURES_PER_PAGE,
+    stop_when_signature_limit_reached: bool = (
+        PDF_STOP_WHEN_SIGNATURE_LIMIT_REACHED
+    ),
     debug_context: dict | None = None,
 ):
     pdf_buffer.seek(0)
@@ -518,6 +522,12 @@ def extract_signature_candidates_from_pdf(
         "max_pages_to_scan": max_pages_to_scan,
         "max_signatures_to_compare": max_signatures_to_compare,
         "max_signatures_per_page": max_signatures_per_page,
+        "stop_when_signature_limit_reached": (
+            stop_when_signature_limit_reached
+        ),
+        "early_stop": False,
+        "early_stop_reason": None,
+        "early_stop_page": None,
         "pdf_dpi": PDF_DPI,
         "signatures_detected": 0,
         "signatures_selected_before_ranking": 0,
@@ -690,6 +700,27 @@ def extract_signature_candidates_from_pdf(
             )
 
             if stop_at_first_page and page_candidates:
+                debug["early_stop"] = True
+                debug["early_stop_reason"] = "first_page_with_signatures"
+                debug["early_stop_page"] = page_number
+                break
+
+            if (
+                stop_when_signature_limit_reached
+                and max_signatures_to_compare
+                and max_signatures_to_compare > 0
+                and len(selected_candidates) >= max_signatures_to_compare
+            ):
+                debug["early_stop"] = True
+                debug["early_stop_reason"] = "signature_limit_reached"
+                debug["early_stop_page"] = page_number
+                logger.warning(
+                    "Deteniendo escaneo PDF por limite de firmas "
+                    "page=%s selected=%s limit=%s",
+                    page_number,
+                    len(selected_candidates),
+                    max_signatures_to_compare,
+                )
                 break
 
         selected_candidates = sorted(

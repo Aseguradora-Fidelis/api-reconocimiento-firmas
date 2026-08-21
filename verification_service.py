@@ -550,11 +550,17 @@ def verify_signature(
         candidates = flatten_pdf_results(pdf_results)
         logger.info(
             "verificacion documento_analizado codigo_cliente=%s archivo=%r "
-            "pages_with_signatures=%s candidates=%s extraction_ms=%.1f",
+            "pages_scanned=%s total_pages=%s pages_with_signatures=%s "
+            "candidates=%s early_stop=%s early_stop_page=%s "
+            "extraction_ms=%.1f",
             codigo_cliente,
             archivo,
+            extraction_debug.get("pages_scanned"),
+            extraction_debug.get("total_pages"),
             len(candidate_pages),
             len(candidates),
+            extraction_debug.get("early_stop"),
+            extraction_debug.get("early_stop_page"),
             (perf_counter() - extraction_started_at) * 1000,
         )
         candidate_audits = {}
