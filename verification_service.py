@@ -1,3 +1,5 @@
+import logging
+
 from audit_service import persist_verification_audit
 from compare_service import compare_signatures
 from detection_service import detect_signatures
@@ -13,6 +15,9 @@ from s3_oracle_service import (
     get_pdf_view_url,
 )
 from watermark import build_watermarked_base64, build_watermarked_signature_base64
+
+
+logger = logging.getLogger(__name__)
 
 
 def flatten_pdf_results(pdf_results):
@@ -265,6 +270,13 @@ def verify_signature(
     fianza: int | None = None,
     background_tasks=None,
 ):
+    logger.info(
+        "verificacion pipeline inicio codigo_cliente=%s "
+        "condicion_entrega_id=%s fianza=%s",
+        codigo_cliente,
+        condicion_entrega_id,
+        fianza,
+    )
     camera_detections, camera_detection_debug = detect_signatures(
         camera_signature,
         debug_context={
@@ -274,6 +286,10 @@ def verify_signature(
     )
 
     if not camera_detections:
+        logger.warning(
+            "verificacion sin_firma_camara codigo_cliente=%s",
+            codigo_cliente,
+        )
         result = {
             "ok": False,
             "match": False,
@@ -327,7 +343,18 @@ def verify_signature(
         fianza=fianza,
     )
 
+    logger.info(
+        "verificacion documentos_consultados codigo_cliente=%s total=%s",
+        codigo_cliente,
+        len(documents),
+    )
+
     if not documents:
+        logger.warning(
+            "verificacion cliente_sin_documentos codigo_cliente=%s fianza=%s",
+            codigo_cliente,
+            fianza,
+        )
         result = {
             "ok": False,
             "match": False,
@@ -416,14 +443,31 @@ def verify_signature(
         "name_match": None,
     }
 
-    for document in documents:
+    for document_index, document in enumerate(documents, start=1):
         archivo = document["archivo"]
         s3_key = document["s3_key"]
+
+        logger.info(
+            "verificacion procesando_documento codigo_cliente=%s "
+            "documento=%s/%s archivo=%r",
+            codigo_cliente,
+            document_index,
+            len(documents),
+            archivo,
+        )
 
         pdf_buffer = get_pdf_from_s3(s3_key)
 
         if pdf_buffer is None:
             errors.append(f"No se pudo leer PDF S3: {s3_key}")
+            logger.warning(
+                "verificacion pdf_no_disponible codigo_cliente=%s "
+                "documento=%s/%s archivo=%r",
+                codigo_cliente,
+                document_index,
+                len(documents),
+                archivo,
+            )
             continue
 
         pdfs_read += 1
@@ -440,6 +484,11 @@ def verify_signature(
             )
         except Exception as e:
             errors.append(f"Error extrayendo firmas de {archivo}: {e}")
+            logger.exception(
+                "verificacion error_extraccion codigo_cliente=%s archivo=%r",
+                codigo_cliente,
+                archivo,
+            )
             continue
 
         pdf_results = extracted["pages"]
@@ -464,6 +513,14 @@ def verify_signature(
         pages_with_signatures += len(candidate_pages)
 
         candidates = flatten_pdf_results(pdf_results)
+        logger.info(
+            "verificacion documento_analizado codigo_cliente=%s archivo=%r "
+            "pages_with_signatures=%s candidates=%s",
+            codigo_cliente,
+            archivo,
+            len(candidate_pages),
+            len(candidates),
+        )
         candidate_audits = {}
 
         for candidate in candidates:
@@ -511,6 +568,14 @@ def verify_signature(
                 errors.append(
                     f"Error comparando {archivo} pagina {page_number} "
                     f"firma {signature_index}: {e}"
+                )
+                logger.exception(
+                    "verificacion error_comparacion codigo_cliente=%s "
+                    "archivo=%r page=%s signature_index=%s",
+                    codigo_cliente,
+                    archivo,
+                    page_number,
+                    signature_index,
                 )
                 continue
 
@@ -622,6 +687,18 @@ def verify_signature(
     ]
 
     if has_match and best_compared_signature:
+        logger.info(
+            "verificacion resultado codigo_cliente=%s match=true "
+            "documents=%s pdfs_read=%s pages_with_signatures=%s "
+            "signatures_compared=%s errors=%s best_score=%s",
+            codigo_cliente,
+            len(documents),
+            pdfs_read,
+            pages_with_signatures,
+            signatures_compared,
+            len(errors),
+            best_attempt["score"],
+        )
         result = {
             "ok": True,
             "match": True,
@@ -708,6 +785,19 @@ def verify_signature(
             audit_payload,
             background_tasks=background_tasks,
         )
+
+    logger.info(
+        "verificacion resultado codigo_cliente=%s match=false documents=%s "
+        "pdfs_read=%s pages_with_signatures=%s signatures_compared=%s "
+        "errors=%s best_score=%s",
+        codigo_cliente,
+        len(documents),
+        pdfs_read,
+        pages_with_signatures,
+        signatures_compared,
+        len(errors),
+        best_attempt["score"],
+    )
 
     result = {
         "ok": True,
