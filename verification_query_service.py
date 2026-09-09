@@ -120,6 +120,7 @@ def get_verification_stats(
         "user_rejected": 0,
         "corrected_by_user": 0,
         "only_accountant": 0,
+        "no_documentation": 0,
     }
 
     conn = None
@@ -142,7 +143,8 @@ def get_verification_stats(
                 SUM(CASE WHEN status = 'user_confirmed' THEN 1 ELSE 0 END) AS user_confirmed,
                 SUM(CASE WHEN status = 'user_rejected' THEN 1 ELSE 0 END) AS user_rejected,
                 SUM(CASE WHEN status = 'corrected_by_user' THEN 1 ELSE 0 END) AS corrected_by_user,
-                SUM(CASE WHEN status = 'only_accountant' THEN 1 ELSE 0 END) AS only_accountant
+                SUM(CASE WHEN status = 'only_accountant' THEN 1 ELSE 0 END) AS only_accountant,
+                SUM(CASE WHEN status = 'no_documentation' THEN 1 ELSE 0 END) AS no_documentation
             FROM firma_verificacion
             WHERE estado = 'A'
               AND TRUNC(created_at) BETWEEN
@@ -186,6 +188,7 @@ def get_verification_stats_daily(
         "user_rejected": 0,
         "corrected_by_user": 0,
         "only_accountant": 0,
+        "no_documentation": 0,
     }
 
     conn = None
@@ -209,7 +212,8 @@ def get_verification_stats_daily(
                 SUM(CASE WHEN status = 'user_confirmed' THEN 1 ELSE 0 END) AS user_confirmed,
                 SUM(CASE WHEN status = 'user_rejected' THEN 1 ELSE 0 END) AS user_rejected,
                 SUM(CASE WHEN status = 'corrected_by_user' THEN 1 ELSE 0 END) AS corrected_by_user,
-                SUM(CASE WHEN status = 'only_accountant' THEN 1 ELSE 0 END) AS only_accountant
+                SUM(CASE WHEN status = 'only_accountant' THEN 1 ELSE 0 END) AS only_accountant,
+                SUM(CASE WHEN status = 'no_documentation' THEN 1 ELSE 0 END) AS no_documentation
             FROM firma_verificacion
             WHERE estado = 'A'
               AND TRUNC(created_at) BETWEEN
@@ -590,12 +594,13 @@ def validate_decision(decision):
         "rejected",
         "corrected",
         "only_accountant",
+        "no_documentation",
     }
 
     if decision not in allowed:
         raise ValueError(
-            "Decision invalida. Use confirmed, rejected, corrected "
-            "u only_accountant"
+            "Decision invalida. Use confirmed, rejected, corrected, "
+            "only_accountant o no_documentation"
         )
 
 
@@ -608,6 +613,9 @@ def resolve_status_for_decision(decision):
 
     if decision == "only_accountant":
         return "only_accountant"
+
+    if decision == "no_documentation":
+        return "no_documentation"
 
     return "corrected_by_user"
 
@@ -795,7 +803,11 @@ def save_user_validation(
             conn.rollback()
 
         if (
-            decision in {"rejected", "only_accountant"}
+            decision in {
+                "rejected",
+                "only_accountant",
+                "no_documentation",
+            }
             and is_required_candidate_error(exc)
         ):
             raise ValueError(
