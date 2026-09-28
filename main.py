@@ -37,12 +37,19 @@ from verification_query_service import (
     get_verification_stats_daily,
     get_verification_snapshot,
     save_user_validation,
+    save_user_validation_con_recepcion,
 )
 
 from s3_oracle_service import (
     get_client_info,
     get_condicion_entrega_info,
     get_client_by_fianza
+)
+
+from rarsys_recepcion_service import (
+    buscar_por_fianza,
+    buscar_por_condicion,
+    buscar_por_cliente,
 )
 
 
@@ -71,6 +78,15 @@ class VerificationValidationRequest(BaseModel):
     validated_by: str | None = None
     notes: str | None = None
     training_eligible: bool = False
+
+
+class VerificationValidationRecepcionRequest(BaseModel):
+    candidate_id: int | None = None
+    decision: str
+    validated_by: str | None = None
+    notes: str | None = None
+    training_eligible: bool = False
+    condicion_entrega_id: int
 
 
 def normalize_date_param(value: str):
@@ -770,4 +786,232 @@ def poliza_info_endpoint(
         raise HTTPException(
             status_code=500,
             detail=f"Error interno: {str(e)}",
+        )
+
+
+# =========================================================
+# RECEPCION DE CONTRAGARANTIAS (rarsys)
+# =========================================================
+# Endpoints NUEVOS de solo consulta que replican
+# Workflow::ProcesosController#busqueda_condicion_real.
+# No modifican datos. La cabecera sale de fia_poliza.
+#
+# Autenticacion: el usuario (usuario_oracle) se recibe como query param,
+# siguiendo el mismo mecanismo de "receptor de usuario" que usa el resto del
+# flujo (validated_by). Punto de extension para OAuth/Bearer cuando exista.
+# =========================================================
+@app.get("/recepcion/fianza/{fianza}")
+def recepcion_por_fianza_endpoint(
+    fianza: int,
+    usuario_oracle: str | None = Query(None),
+):
+    started_at = perf_counter()
+    logger.info(
+        "recepcion consulta por_fianza fianza=%s usuario=%s",
+        fianza,
+        usuario_oracle,
+    )
+
+    try:
+        result = buscar_por_fianza(fianza=fianza)
+
+        logger.info(
+            "recepcion por_fianza resultado fianza=%s condiciones=%s "
+            "duration_ms=%.1f",
+            fianza,
+            len(result.get("condiciones") or []),
+            (perf_counter() - started_at) * 1000,
+        )
+        return result
+
+    except Exception as e:
+        logger.exception(
+            "recepcion por_fianza error fianza=%s duration_ms=%.1f",
+            fianza,
+            (perf_counter() - started_at) * 1000,
+        )
+        raise HTTPException(
+            status_code=500,
+            detail=f"Error interno consultando contragarantias: {str(e)}",
+        )
+
+
+@app.get("/recepcion/condicion-entrega/{valor}")
+def recepcion_por_condicion_endpoint(
+    valor: int,
+    usuario_oracle: str | None = Query(None),
+):
+    started_at = perf_counter()
+    logger.info(
+        "recepcion consulta por_condicion condicion_entrega_id=%s usuario=%s",
+        valor,
+        usuario_oracle,
+    )
+
+    try:
+        result = buscar_por_condicion(condicion_entrega_id=valor)
+
+        logger.info(
+            "recepcion por_condicion resultado condicion_entrega_id=%s "
+            "condiciones=%s duration_ms=%.1f",
+            valor,
+            len(result.get("condiciones") or []),
+            (perf_counter() - started_at) * 1000,
+        )
+        return result
+
+    except Exception as e:
+        logger.exception(
+            "recepcion por_condicion error condicion_entrega_id=%s "
+            "duration_ms=%.1f",
+            valor,
+            (perf_counter() - started_at) * 1000,
+        )
+        raise HTTPException(
+            status_code=500,
+            detail=f"Error interno consultando contragarantias: {str(e)}",
+        )
+
+
+@app.get("/recepcion/cliente/{codigo}")
+def recepcion_por_cliente_endpoint(
+    codigo: int,
+    usuario_oracle: str | None = Query(None),
+):
+    started_at = perf_counter()
+    logger.info(
+        "recepcion consulta por_cliente codigo_cliente=%s usuario=%s",
+        codigo,
+        usuario_oracle,
+    )
+
+    try:
+        result = buscar_por_cliente(codigo_cliente=codigo)
+
+        logger.info(
+            "recepcion por_cliente resultado codigo_cliente=%s condiciones=%s "
+            "duration_ms=%.1f",
+            codigo,
+            len(result.get("condiciones") or []),
+            (perf_counter() - started_at) * 1000,
+        )
+        return result
+
+    except Exception as e:
+        logger.exception(
+            "recepcion por_cliente error codigo_cliente=%s duration_ms=%.1f",
+            codigo,
+            (perf_counter() - started_at) * 1000,
+        )
+        raise HTTPException(
+            status_code=500,
+            detail=f"Error interno consultando contragarantias: {str(e)}",
+        )
+
+
+# =========================================================
+# VALIDAR + RECEPCIONAR (transaccion conjunta)
+# =========================================================
+# Endpoint NUEVO en paralelo a /verification/{id}/validate (que queda intacto).
+# Registra la validacion de firma y recepciona la condicion de entrega en
+# rarsys de forma transaccional (todo o nada).
+#
+# usuario_oracle se toma de validated_by (receptor de usuario del flujo). No
+# se confia en un usuario distinto en el cuerpo; este es el campo que el
+# frontend ya envia con el usuario que ejecuta la accion.
+# =========================================================
+@app.post("/verification/{verification_id}/validate-recepcion")
+def verification_validate_recepcion_endpoint(
+    verification_id: int,
+    payload: VerificationValidationRecepcionRequest,
+):
+    started_at = perf_counter()
+    usuario_oracle = payload.validated_by
+
+    logger.info(
+        "verification validate-recepcion inicio verification_id=%s "
+        "candidate_id=%s decision=%s condicion_entrega_id=%s usuario=%s",
+        verification_id,
+        payload.candidate_id,
+        payload.decision,
+        payload.condicion_entrega_id,
+        usuario_oracle,
+    )
+
+    if not usuario_oracle:
+        raise HTTPException(
+            status_code=400,
+            detail="validated_by (usuario_oracle) es requerido",
+        )
+
+    try:
+        result = save_user_validation_con_recepcion(
+            verification_id=verification_id,
+            candidate_id=payload.candidate_id,
+            decision=payload.decision,
+            condicion_entrega_id=payload.condicion_entrega_id,
+            usuario_oracle=usuario_oracle,
+            validated_by=payload.validated_by,
+            notes=payload.notes,
+            training_eligible=payload.training_eligible,
+        )
+
+        if not result:
+            logger.warning(
+                "verification validate-recepcion sin_resultado "
+                "verification_id=%s duration_ms=%.1f",
+                verification_id,
+                (perf_counter() - started_at) * 1000,
+            )
+            raise HTTPException(
+                status_code=404,
+                detail="Verificacion no encontrada",
+            )
+
+        snapshot = get_verification_snapshot(
+            verification_id=verification_id,
+        )
+
+        logger.info(
+            "verification validate-recepcion ok verification_id=%s "
+            "condicion_entrega_id=%s cumplida_sn=%s duration_ms=%.1f",
+            verification_id,
+            payload.condicion_entrega_id,
+            (result.get("reception") or {}).get("cumplida_sn"),
+            (perf_counter() - started_at) * 1000,
+        )
+
+        return {
+            "ok": True,
+            "validation": result.get("validation"),
+            "reception": result.get("reception"),
+            "snapshot": snapshot,
+        }
+
+    except ValueError as e:
+        logger.warning(
+            "verification validate-recepcion invalida verification_id=%s "
+            "error=%s duration_ms=%.1f",
+            verification_id,
+            e,
+            (perf_counter() - started_at) * 1000,
+        )
+        raise HTTPException(
+            status_code=400,
+            detail=str(e),
+        )
+
+    except HTTPException:
+        raise
+
+    except Exception as e:
+        logger.exception(
+            "verification validate-recepcion error verification_id=%s "
+            "duration_ms=%.1f",
+            verification_id,
+            (perf_counter() - started_at) * 1000,
+        )
+        raise HTTPException(
+            status_code=500,
+            detail=f"Error interno validando/recepcionando: {str(e)}",
         )

@@ -656,7 +656,8 @@ def is_required_candidate_error(exc):
     )
 
 
-def save_user_validation(
+def _apply_user_validation(
+    cursor,
     verification_id: int,
     candidate_id: int | None,
     decision: str,
@@ -664,6 +665,23 @@ def save_user_validation(
     notes: str | None = None,
     training_eligible: bool = False,
 ):
+    """Aplica la validacion de usuario sobre un cursor compartido.
+
+    Ejecuta la misma logica de negocio que save_user_validation (validacion
+    de decision, INSERT en FIRMA_VALIDACION_USUARIO y UPDATE del estado en
+    FIRMA_VERIFICACION) pero SIN abrir conexion ni hacer commit/rollback.
+    Esto permite componer la validacion con otras operaciones (por ejemplo
+    la recepcion en rarsys) dentro de una unica transaccion.
+
+    Devuelve el mismo dict que save_user_validation, o None si la
+    verificacion no existe / no esta activa. La decision ya normalizada se
+    deja disponible en cursor via el retorno para el manejo de errores del
+    llamador.
+
+    El llamador es responsable de commit/rollback y del manejo de la
+    DatabaseError de candidato requerido.
+    """
+
     decision = (decision or "").strip().lower()
 
     validate_decision(decision)
@@ -676,6 +694,142 @@ def save_user_validation(
             "candidate_id es requerido para confirmed o corrected"
         )
 
+    verification = fetch_one_dict(
+        cursor,
+        """
+        SELECT ID
+        FROM FIRMA_VERIFICACION
+        WHERE ID = :verification_id
+          AND ESTADO = :estado_activo
+        """,
+        {
+            "verification_id": verification_id,
+            "estado_activo": ACTIVE_VERIFICATION_STATE,
+        },
+    )
+
+    if not verification:
+        return None
+
+    if candidate_id:
+        candidate = get_candidate_for_validation(
+            cursor,
+            verification_id,
+            candidate_id,
+        )
+
+        if not candidate:
+            raise ValueError(
+                "La candidata no pertenece a esta verificacion"
+            )
+
+    id_var = cursor.var(oracledb.NUMBER)
+
+    cursor.execute(
+        """
+        INSERT INTO FIRMA_VALIDACION_USUARIO (
+            VERIFICACION_ID,
+            CANDIDATO_ID,
+            DECISION,
+            VALIDATED_BY,
+            NOTES,
+            TRAINING_ELIGIBLE
+        ) VALUES (
+            :verification_id,
+            :candidate_id,
+            :decision,
+            :validated_by,
+            :notes,
+            :training_eligible
+        )
+        RETURNING ID INTO :id
+        """,
+        {
+            "verification_id": verification_id,
+            "candidate_id": candidate_id,
+            "decision": decision,
+            "validated_by": validated_by,
+            "notes": notes,
+            "training_eligible": "S" if training_eligible else "N",
+            "id": id_var,
+        },
+    )
+
+    status = resolve_status_for_decision(decision)
+
+    if decision == "rejected":
+        cursor.execute(
+            """
+            UPDATE FIRMA_VERIFICACION
+               SET STATUS = :status,
+                   BEST_CANDIDATO_ID = NULL,
+                   UPDATED_AT = SYSTIMESTAMP
+             WHERE ID = :verification_id
+            """,
+            {
+                "status": status,
+                "verification_id": verification_id,
+            },
+        )
+
+    elif decision in {"confirmed", "corrected"}:
+        cursor.execute(
+            """
+            UPDATE FIRMA_VERIFICACION
+               SET STATUS = :status,
+                   BEST_CANDIDATO_ID = :candidate_id,
+                   UPDATED_AT = SYSTIMESTAMP
+             WHERE ID = :verification_id
+            """,
+            {
+                "status": status,
+                "candidate_id": candidate_id,
+                "verification_id": verification_id,
+            },
+        )
+
+    else:
+        cursor.execute(
+            """
+            UPDATE FIRMA_VERIFICACION
+               SET STATUS = :status,
+                   UPDATED_AT = SYSTIMESTAMP
+             WHERE ID = :verification_id
+            """,
+            {
+                "status": status,
+                "verification_id": verification_id,
+            },
+        )
+
+    return {
+        "validation_id": int(id_var.getvalue()[0]),
+        "status": status,
+    }
+
+
+def is_required_candidate_error_for_decision(decision, exc):
+    """True si el error es por candidato requerido en una decision sin candidato."""
+
+    decision = (decision or "").strip().lower()
+    return (
+        decision in {
+            "rejected",
+            "only_accountant",
+            "no_documentation",
+        }
+        and is_required_candidate_error(exc)
+    )
+
+
+def save_user_validation(
+    verification_id: int,
+    candidate_id: int | None,
+    decision: str,
+    validated_by: str | None = None,
+    notes: str | None = None,
+    training_eligible: bool = False,
+):
     conn = None
     cursor = None
 
@@ -683,133 +837,28 @@ def save_user_validation(
         conn = get_connection()
         cursor = conn.cursor()
 
-        verification = fetch_one_dict(
+        result = _apply_user_validation(
             cursor,
-            """
-            SELECT ID
-            FROM FIRMA_VERIFICACION
-            WHERE ID = :verification_id
-              AND ESTADO = :estado_activo
-            """,
-            {
-                "verification_id": verification_id,
-                "estado_activo": ACTIVE_VERIFICATION_STATE,
-            },
+            verification_id=verification_id,
+            candidate_id=candidate_id,
+            decision=decision,
+            validated_by=validated_by,
+            notes=notes,
+            training_eligible=training_eligible,
         )
 
-        if not verification:
+        if result is None:
             return None
-
-        if candidate_id:
-            candidate = get_candidate_for_validation(
-                cursor,
-                verification_id,
-                candidate_id,
-            )
-
-            if not candidate:
-                raise ValueError(
-                    "La candidata no pertenece a esta verificacion"
-                )
-
-        id_var = cursor.var(oracledb.NUMBER)
-
-        cursor.execute(
-            """
-            INSERT INTO FIRMA_VALIDACION_USUARIO (
-                VERIFICACION_ID,
-                CANDIDATO_ID,
-                DECISION,
-                VALIDATED_BY,
-                NOTES,
-                TRAINING_ELIGIBLE
-            ) VALUES (
-                :verification_id,
-                :candidate_id,
-                :decision,
-                :validated_by,
-                :notes,
-                :training_eligible
-            )
-            RETURNING ID INTO :id
-            """,
-            {
-                "verification_id": verification_id,
-                "candidate_id": candidate_id,
-                "decision": decision,
-                "validated_by": validated_by,
-                "notes": notes,
-                "training_eligible": "S" if training_eligible else "N",
-                "id": id_var,
-            },
-        )
-
-        status = resolve_status_for_decision(decision)
-
-        if decision == "rejected":
-            cursor.execute(
-                """
-                UPDATE FIRMA_VERIFICACION
-                   SET STATUS = :status,
-                       BEST_CANDIDATO_ID = NULL,
-                       UPDATED_AT = SYSTIMESTAMP
-                 WHERE ID = :verification_id
-                """,
-                {
-                    "status": status,
-                    "verification_id": verification_id,
-                },
-            )
-
-        elif decision in {"confirmed", "corrected"}:
-            cursor.execute(
-                """
-                UPDATE FIRMA_VERIFICACION
-                   SET STATUS = :status,
-                       BEST_CANDIDATO_ID = :candidate_id,
-                       UPDATED_AT = SYSTIMESTAMP
-                 WHERE ID = :verification_id
-                """,
-                {
-                    "status": status,
-                    "candidate_id": candidate_id,
-                    "verification_id": verification_id,
-                },
-            )
-
-        else:
-            cursor.execute(
-                """
-                UPDATE FIRMA_VERIFICACION
-                   SET STATUS = :status,
-                       UPDATED_AT = SYSTIMESTAMP
-                 WHERE ID = :verification_id
-                """,
-                {
-                    "status": status,
-                    "verification_id": verification_id,
-                },
-            )
 
         conn.commit()
 
-        return {
-            "validation_id": int(id_var.getvalue()[0]),
-            "status": status,
-        }
+        return result
 
     except oracledb.DatabaseError as exc:
         if conn:
             conn.rollback()
 
-        if (
-            decision in {
-                "rejected",
-                "only_accountant",
-                "no_documentation",
-            }
-            and is_required_candidate_error(exc)
-        ):
+        if is_required_candidate_error_for_decision(decision, exc):
             raise ValueError(
                 "La base de datos no permite registrar esta decision sin "
                 "candidate_id. Permita NULL en "
@@ -1124,6 +1173,105 @@ def deactivate_verification(verification_id: int):
         conn.commit()
 
         return updated
+
+    except Exception:
+        if conn:
+            conn.rollback()
+
+        raise
+
+    finally:
+        if cursor:
+            cursor.close()
+
+        if conn:
+            conn.close()
+
+
+def save_user_validation_con_recepcion(
+    verification_id: int,
+    candidate_id: int | None,
+    decision: str,
+    condicion_entrega_id: int,
+    usuario_oracle: str,
+    validated_by: str | None = None,
+    notes: str | None = None,
+    training_eligible: bool = False,
+):
+    """Registra la validacion de firma y recepciona la condicion de entrega
+    en una unica transaccion (commit conjunto, rollback ante cualquier fallo).
+
+    - La validacion usa exactamente la misma logica que save_user_validation.
+    - La recepcion replica recepcionar_condicion de rarsys sobre el MISMO
+      cursor, de modo que si cualquiera de las dos falla, no se persiste nada.
+
+    Devuelve un dict con 'validation' y 'reception', o None si la
+    verificacion no existe / no esta activa (en cuyo caso no se recepciona
+    nada). Lanza ValueError con un mensaje claro si la recepcion no procede
+    (condicion inexistente o ya recepcionada).
+    """
+
+    # Import local para evitar cualquier ciclo de importacion.
+    from rarsys_recepcion_service import recepcionar_condicion
+
+    if condicion_entrega_id is None:
+        raise ValueError("condicion_entrega_id es requerido")
+
+    if not usuario_oracle:
+        raise ValueError("usuario_oracle es requerido")
+
+    conn = None
+    cursor = None
+
+    try:
+        conn = get_connection()
+        cursor = conn.cursor()
+
+        # 1) Validacion de firma (sin commit).
+        validation = _apply_user_validation(
+            cursor,
+            verification_id=verification_id,
+            candidate_id=candidate_id,
+            decision=decision,
+            validated_by=validated_by,
+            notes=notes,
+            training_eligible=training_eligible,
+        )
+
+        if validation is None:
+            # Verificacion inexistente: no se recepciona nada.
+            conn.rollback()
+            return None
+
+        # 2) Recepcion de la condicion de entrega (sin commit).
+        #    Si falla (no existe o no esta en 'A'), lanza ValueError y el
+        #    except revierte toda la transaccion.
+        reception = recepcionar_condicion(
+            cursor,
+            condicion_entrega_id=condicion_entrega_id,
+            usuario_oracle=usuario_oracle,
+        )
+
+        # 3) Commit conjunto.
+        conn.commit()
+
+        return {
+            "validation": validation,
+            "reception": reception,
+        }
+
+    except oracledb.DatabaseError as exc:
+        if conn:
+            conn.rollback()
+
+        if is_required_candidate_error_for_decision(decision, exc):
+            raise ValueError(
+                "La base de datos no permite registrar esta decision sin "
+                "candidate_id. Permita NULL en "
+                "FIRMA_VALIDACION_USUARIO.CANDIDATO_ID."
+            ) from exc
+
+        raise
 
     except Exception:
         if conn:
