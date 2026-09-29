@@ -37,7 +37,7 @@ ESTADO_ACTIVA = "A"
 ESTADO_RECEPCIONADA = "P"
 ESTADO_COMPLETADA = "S"
 
-ESTADOS_CONSULTA = ("A", "P", "N")
+ESTADOS_CONSULTA = ("A", "P", "N", "S")
 
 # tipo_garantia_id que NO se muestra ni avanza a 'S'
 TIPO_GARANTIA_EXCLUIDO = 10
@@ -46,12 +46,23 @@ TIPO_GARANTIA_EXCLUIDO = 10
 # =========================================================
 # CONSULTA (busqueda_condicion_real)
 # =========================================================
-def _fetch_condiciones(cursor, filtro_sql, params):
+def _fetch_condiciones(cursor, filtro_sql, params, order_sql=None, limit=None):
     """Ejecuta la consulta de condiciones de entrega tipo 3.
 
     filtro_sql debe ser un predicado adicional sobre el alias 'ce'
     (por ejemplo "ce.fianza = :valor").
+
+    order_sql: clausula ORDER BY opcional (sin la palabra ORDER BY). Si no
+    se indica, se ordena por ce.id.
+
+    limit: numero maximo de filas a devolver (FETCH FIRST N ROWS ONLY). Si es
+    None, se devuelven todas.
     """
+
+    order_clause = order_sql if order_sql else "ce.id"
+    limit_clause = ""
+    if limit is not None:
+        limit_clause = "FETCH FIRST :row_limit ROWS ONLY"
 
     # La descripcion del tipo de contragarantia se obtiene por LEFT JOIN al
     # catalogo tipo_contragarantia (verificado: tipo_garantia_id enlaza con
@@ -71,10 +82,11 @@ def _fetch_condiciones(cursor, filtro_sql, params):
         LEFT JOIN main_fusa.tipo_contragarantia tg
             ON tg.id = ce.tipo_garantia_id
         WHERE ce.tipo_condicion = :tipo_condicion
-          AND ce.cumplida_sn IN ('A', 'P', 'N')
+          AND ce.cumplida_sn IN ('A', 'P', 'N', 'S')
           AND (ce.tipo_garantia_id IS NULL OR ce.tipo_garantia_id <> :tipo_excluido)
           AND {filtro_sql}
-        ORDER BY ce.id
+        ORDER BY {order_clause}
+        {limit_clause}
     """
 
     merged = {
@@ -82,6 +94,9 @@ def _fetch_condiciones(cursor, filtro_sql, params):
         "tipo_excluido": TIPO_GARANTIA_EXCLUIDO,
     }
     merged.update(params)
+
+    if limit is not None:
+        merged["row_limit"] = limit
 
     cursor.execute(query, merged)
 
@@ -220,12 +235,17 @@ def buscar_por_condicion(condicion_entrega_id: int):
 
 
 def buscar_por_cliente(codigo_cliente: int):
-    """Condiciones tipo 3 de todas las fianzas de un cliente.
+    """Ultimas 5 condiciones tipo 3 de las fianzas de un cliente.
 
-    Un cliente puede tener varias fianzas. La estructura de respuesta admite
-    una sola cabecera; se usa la fianza de la primera condicion encontrada y
-    se listan todas las condiciones. Si se requiere agrupar por fianza,
-    ajustar el contrato de respuesta.
+    Un cliente puede acumular cientos de condiciones. Para el modal de
+    recepcion solo se devuelven las 5 mas recientes, ordenadas por fecha de
+    grabacion descendente (mas reciente primero; id como desempate para
+    filas sin fecha).
+
+    La cabecera (fianza/fiado/monto) se arma con la fianza de la primera
+    condicion del resultado (la mas reciente). Si el cliente tiene varias
+    fianzas con pendientes, considerar consultar por fianza para el detalle
+    completo.
     """
 
     conn = None
@@ -242,6 +262,8 @@ def buscar_por_cliente(codigo_cliente: int):
                 WHERE p.cod_contacto_cliente = :valor
             )""",
             {"valor": codigo_cliente},
+            order_sql="ce.grabacion_fecha DESC NULLS LAST, ce.id DESC",
+            limit=5,
         )
 
         return _build_response(cursor, condiciones)
@@ -259,36 +281,39 @@ def buscar_por_cliente(codigo_cliente: int):
 def recepcionar_condicion(cursor, condicion_entrega_id: int, usuario_oracle: str):
     """Recepciona una condicion de entrega sobre un cursor compartido.
 
-    Replica Workflow::ProcesosController#recepcionar_condicion:
-      - Busca la condicion con id = condicion_entrega_id y cumplida_sn = 'A'.
-      - Si existe: cumplida_sn = 'P', usuario_pendiente = usuario_oracle,
-        fecha_pendiente = ahora,
+    Basado en Workflow::ProcesosController#recepcionar_condicion, con una
+    diferencia intencional: se permite recepcionar desde CUALQUIER estado
+    (A/P/N/S), no solo desde 'A'. Esto cubre el caso de negocio en que una
+    contragarantia ya recepcionada se vuelve a traer por error y se necesita
+    poder re-recepcionarla.
+
+      - Busca la condicion por id (sin filtrar por estado).
+      - Si existe: usuario_pendiente = usuario_oracle, fecha_pendiente = ahora,
         observaciones_pendiente = "Condicion de entrega recepcionada por {usuario}".
       - Regla de avance: si tipo_garantia_id = 10 queda en 'P';
-        para cualquier otro tipo avanza a 'S' (aceptacion).
+        para cualquier otro tipo pasa a 'S' (aceptacion).
 
     NO hace commit ni abre conexion: opera sobre el cursor recibido para
     permitir transaccionalidad conjunta con la validacion de firma.
 
-    Lanza ValueError si la condicion no existe o no esta en estado 'A'.
-    Devuelve dict con el estado final.
+    Lanza ValueError solo si la condicion no existe.
+    Devuelve dict con el estado previo y el estado final.
     """
 
     if not usuario_oracle:
         raise ValueError("usuario_oracle es requerido para recepcionar")
 
-    # Buscar la condicion en estado 'A' (bloqueando la fila para la transaccion).
+    # Buscar la condicion por id (bloqueando la fila para la transaccion),
+    # sin restringir por estado: se permite recepcionar en cualquier estado.
     cursor.execute(
         """
         SELECT id, tipo_garantia_id, cumplida_sn
         FROM main_fusa.fia_condicion_entrega
         WHERE id = :id
-          AND cumplida_sn = :estado_activa
         FOR UPDATE
         """,
         {
             "id": condicion_entrega_id,
-            "estado_activa": ESTADO_ACTIVA,
         },
     )
 
@@ -296,11 +321,11 @@ def recepcionar_condicion(cursor, condicion_entrega_id: int, usuario_oracle: str
 
     if not row:
         raise ValueError(
-            "La condicion de entrega no existe o ya no esta en estado "
-            "'A' (pendiente). Es posible que ya haya sido recepcionada."
+            "La condicion de entrega no existe."
         )
 
     tipo_garantia_id = row[1]
+    estado_previo = row[2]
 
     observaciones = f"Condicion de entrega recepcionada por {usuario_oracle}"
     ahora = datetime.now()
@@ -320,7 +345,6 @@ def recepcionar_condicion(cursor, condicion_entrega_id: int, usuario_oracle: str
                fecha_pendiente = :fecha,
                observaciones_pendiente = :observaciones
          WHERE id = :id
-           AND cumplida_sn = :estado_activa
         """,
         {
             "estado_final": estado_final,
@@ -328,18 +352,18 @@ def recepcionar_condicion(cursor, condicion_entrega_id: int, usuario_oracle: str
             "fecha": ahora,
             "observaciones": observaciones,
             "id": condicion_entrega_id,
-            "estado_activa": ESTADO_ACTIVA,
         },
     )
 
     if cursor.rowcount != 1:
         raise ValueError(
             "No se pudo recepcionar la condicion de entrega "
-            f"{condicion_entrega_id} (estado cambiado concurrentemente)."
+            f"{condicion_entrega_id} (afecto un numero inesperado de filas)."
         )
 
     return {
         "condicion_entrega_id": condicion_entrega_id,
         "cumplida_sn": estado_final,
+        "estado_previo": estado_previo,
         "recepcionada": True,
     }
